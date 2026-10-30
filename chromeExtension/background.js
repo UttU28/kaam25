@@ -8,7 +8,7 @@ const extensionVersion = chrome.runtime.getManifest().version;
 
 // Keep equal to "version" in manifest.json. Chrome can keep running an old saved copy of this
 // file after an update (seen across a Chrome restart); when it does, reload to get the new code.
-const backgroundBuild = "3.21";
+const backgroundBuild = "3.24";
 if (extensionVersion !== backgroundBuild) chrome.runtime.reload();
 
 // Sends to the app. If the app says our files changed on disk, reload to pick them up.
@@ -351,6 +351,34 @@ async function reuseTab(kind, url, newTab) {
   return false;
 }
 
+// ---------- back to the Kaam25 tab when the work is done ----------
+// A job that finished fine brings the app's tab (127.0.0.1:5000-5020) to the front a few seconds
+// later - unless more work starts first (a new job or tab), e.g. Start's TEMS check -> ticket -> TEMS.
+// A failed job leaves you on its tab so you can see what happened.
+let focusAppTimer = null;
+function cancelFocusApp() { clearTimeout(focusAppTimer); focusAppTimer = null; }
+function focusAppSoon(delayMs = 4000) {
+  cancelFocusApp();
+  focusAppTimer = setTimeout(async () => {
+    focusAppTimer = null;
+    const jobs = await getAllJobs();
+    if (Object.values(jobs).some((job) => job && Date.now() - job.startedAt < jobMaxAgeMs)) return; // still busy
+    const tabs = await chrome.tabs.query({ url: ["http://127.0.0.1/*", "http://localhost/*"] });
+    const appTabs = tabs.filter((tab) => {
+      try { const port = Number(new URL(tab.url).port); return port >= 5000 && port <= 5020; } catch { return false; }
+    });
+    if (!appTabs.length) return;
+    const tab = appTabs.sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0))[0];
+    if (tab.active) {
+      const win = await chrome.windows.get(tab.windowId).catch(() => null);
+      if (win && win.focused) return;
+    }
+    await chrome.tabs.update(tab.id, { active: true }).catch(() => {});
+    await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+  }, delayMs);
+}
+chrome.tabs.onCreated.addListener(() => cancelFocusApp());
+
 async function handleMessage(message, sender) {
   switch (message.type) {
     case "reuseTab":
@@ -365,9 +393,11 @@ async function handleMessage(message, sender) {
       await chrome.scripting.executeScript({ target: { tabId: sender.tab.id }, world: "MAIN", func: hookWhatsappFilePicker });
       return true;
     case "whatsappStart":
+      cancelFocusApp();
       startWhatsappShare(message, sender.tab); // runs on; the result comes back through jobDone
       return true;
     case "temsStart":
+      cancelFocusApp();
       startTems(message, sender.tab); // runs on; the result comes back through jobDone
       return true;
     case "realTypeLines":
@@ -417,6 +447,7 @@ async function handleMessage(message, sender) {
         return false;
       }
     case "jobStart":
+      cancelFocusApp();
       await setJob(sender.tab.id, {
         kind: message.kind, requestId: message.requestId, data: message.data, startedAt: Date.now(),
       });
@@ -451,6 +482,7 @@ async function handleMessage(message, sender) {
         debugLog("job done - closing its tab", sender.tab);
         setTimeout(() => chrome.tabs.remove(job.tabId).catch(() => {}), 1500);
       }
+      if (!result.error && result.ok !== false) focusAppSoon();
       return true;
     }
   }

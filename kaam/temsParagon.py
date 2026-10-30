@@ -32,7 +32,7 @@ def runTems(action, wo="", cloudWo="", assignWo="", project=temsProject, url=tem
         buildUrl, openUrl=openUrl, startTimeout=startTimeout, timeout=timeout,
         timeoutMessage="TEMS didn't finish. Check the TEMS tab and its login window.",
     )
-    keys = ("ok", "summary", "error", "found", "notFound", "reserved", "opened", "suggestions")
+    keys = ("ok", "summary", "error", "found", "notFound", "reserved", "opened", "suggestions", "matchedWo")
     result = {key: message.get(key) for key in keys if key in message}
     if not result.get("ok") and not result.get("error"):
         result["error"] = "TEMS didn't say what happened. Check the TEMS tab."

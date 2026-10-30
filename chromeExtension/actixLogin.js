@@ -35,9 +35,10 @@
     debugLog(`finished: ok=${ok} ${error || summary || ""}`);
     clearInterval(timer);
     sessionStorage.removeItem("kaamMicrosoftClicks");
-    // Only a finished upload (with its Job ID) leaves nothing to do in this tab.
-    // EQ tabs stay open until you click Done in the app; the app then asks for them to close.
-    chrome.runtime.sendMessage({ type: "jobDone", result: { ok, error, summary, jobId, keepTab: true } });
+    // A finished upload (with its Job ID) leaves nothing to do in this tab: close it now.
+    // Anything else stays open so you can see what happened (closed when you click Done in the app).
+    const done = !!(ok && jobId);
+    chrome.runtime.sendMessage({ type: "jobDone", result: { ok, error, summary, jobId, closeTab: done, keepTab: !done } });
   };
 
   // ---------- helpers ----------

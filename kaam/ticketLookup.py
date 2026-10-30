@@ -112,7 +112,7 @@ def closeTicketSteps(wo, ticketId=None, logfile=None, url=ticketsUrl, openUrl=op
             registerFiles(requestId, [Path(csvPath)])
         return f"{url}#" + urllib.parse.urlencode({
             "kaamWo": wo, "kaamId": requestId, "kaamUrl": url, "kaamMode": "close",
-            "kaamTicket": ticketId or "", "kaamClose": "0",
+            "kaamTicket": ticketId or "", "kaamClose": closeFlag,
             "kaamEq3": text(logfile.get("eq3")), "kaamEq6": text(logfile.get("eq6")),
             "kaamGridsTotal": text(logfile.get("total")), "kaamGridsTested": text(logfile.get("tested")),
             "kaamGridsSkipped": text(logfile.get("skipped")), "kaamCsv": Path(csvPath).name if csvPath else "",
@@ -138,7 +138,7 @@ def closeStepStartDriving(wo, ticketId=None, url=ticketsUrl, openUrl=openInChrom
     def buildUrl(requestId):
         return f"{url}#" + urllib.parse.urlencode({
             "kaamWo": wo, "kaamId": requestId, "kaamUrl": url, "kaamMode": "close",
-            "kaamTicket": ticketId or "", "kaamClose": "0",
+            "kaamTicket": ticketId or "", "kaamClose": closeFlag,
         })
 
     message = runInChrome(

@@ -554,8 +554,9 @@
           const next = result.nextTasks.length
             ? ` Next task: ${result.nextTasks.join(", ")} (not automated yet).`
             : " The ticket shows no open tasks.";
+          // Nothing left for you on the ticket: close the tab. A task still to do by hand: keep it open.
           finish({ ok: true, stepsDone: result.stepsDone, alreadyDone: result.alreadyDone,
-                   summary: `Done: ${parts.join(", ") || "nothing to do"}.${next}` });
+                   summary: `Done: ${parts.join(", ") || "nothing to do"}.${next}`, closeTab: !result.nextTasks.length });
         },
         async (error) => {
           const latest = await chrome.runtime.sendMessage({ type: "jobState" });

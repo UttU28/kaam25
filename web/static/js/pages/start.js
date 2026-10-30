@@ -196,7 +196,21 @@ export default {
         catch (error) { done = { state: "error", error: error.message }; }
         if (done.state === "stopped") { msg("Stopped by you.", "bad"); return null; }
         const r = done.result || {};
-        if (done.state === "done" && r.ok && r.found) { msg(r.summary, "ok"); return wo; }
+        if (done.state === "done" && r.ok && r.found) {
+          // TEMS found it under its d/e twin (the exact name wasn't there): use TEMS's name
+          // everywhere (Records too) - already confirmed, so no second check.
+          const tems = r.matchedWo || wo;
+          if (tems.replace(/\s+/g, "").toLowerCase() !== wo.replace(/\s+/g, "").toLowerCase()) {
+            try {
+              const renamed = await api("/api/records/rename", { body: { oldWo: wo, newWo: tems } });
+              toast(renamed.renamed ? `TEMS has it as ${tems} - updated in Records` : `TEMS has it as ${tems}`, "ok");
+            } catch (error) { msg(error.message, "bad"); return null; }
+            box.set(tems);
+            loadWaiting();
+          }
+          msg(r.summary, "ok");
+          return tems;
+        }
         if (done.state !== "done" || !r.ok) {
           // TEMS couldn't be checked (not running, project missing...): start anyway?
           const choice = await modal({
@@ -208,22 +222,9 @@ export default {
           skipTemsFor = wo;
           return wo;
         }
-        // Not in TEMS: maybe the WO is slightly off (G23d vs G23e, a missing letter...).
-        // TEMS has exactly one WO with the same number and date: that's the one - use its spelling
-        // everywhere (Records too) and go on. Several or none: ask.
+        // Not in TEMS under either spelling: ask. Close TEMS names (same number and date) are only
+        // offered in the popup - never used without you pressing the button.
         const suggestions = r.suggestions || [];
-        if (suggestions.length === 1) {
-          const fixed = suggestions[0];
-          try {
-            const renamed = await api("/api/records/rename", { body: { oldWo: wo, newWo: fixed } });
-            toast(renamed.renamed ? `TEMS has it as ${fixed} - updated in Records` : `TEMS has it as ${fixed}`, "ok");
-          } catch (error) { msg(error.message, "bad"); return null; }
-          msg(`TEMS has this WO as ${fixed} (not ${wo}) - WO updated, checking again…`, "info");
-          box.set(fixed);
-          wo = fixed;
-          loadWaiting();
-          continue;
-        }
         const fix = await formModal({
           title: "WO not found in TEMS",
           body: `<b>${esc(wo)}</b> isn't in TEMS Cloud (${esc(store.settings?.temsProject || "")}) or on Assign.\n` +

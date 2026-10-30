@@ -196,6 +196,13 @@
       .map((x) => x.name);
   };
 
+  // The same WO with the script letter swapped: "..._ G23d_2U_..." <-> "..._ G23e_2U_..." (only d / e).
+  const twinOf = (wo) => {
+    const swapped = String(wo || "").replace(/(_\s*[A-Za-z]\d+)([dDeE])(\s*_)/, (all, head, letter, tail) =>
+      head + ({ d: "e", e: "d", D: "E", E: "D" })[letter] + tail);
+    return swapped !== wo ? swapped : "";
+  };
+
   // Only used to see when the list stops changing.
   const assignmentCount = () => (textOf(content()).match(/\b(In Progress|Planned|Completed)\b/g) || []).length;
 
@@ -367,12 +374,27 @@
     // ---------- actions ----------
     if (action === "find") {
       // Before the ticket is made: is the WO in TEMS at all (Cloud list, or already on Assign)?
+      // One pass per list looks for both spellings: the WO exactly as given wins; its d/e twin
+      // (G23d <-> G23e, everything else identical) is used only when the exact one isn't there.
+      const twin = twinOf(wo);
+      const seenIn = (names) => [...names].find((name) => twin && squash(name) === squash(twin));
+      seenNames.clear();
       if (await cloudRowFor(wo)) {
-        finish({ ok: true, found: "cloud", summary: `${wo} is in TEMS Cloud (${project}) - it gets reserved after the ticket.` });
+        finish({ ok: true, found: "cloud", matchedWo: wo, summary: `${wo} is in TEMS Cloud (${project}) - it gets reserved after the ticket.` });
         return;
       }
+      const cloudTwin = seenIn(seenNames);
+      seenNames.clear();
       if (await assignRowFor(wo, 3000)) {
-        finish({ ok: true, found: "assign", summary: `${wo} is already on TEMS's Assign tab - it gets opened after the ticket.` });
+        finish({ ok: true, found: "assign", matchedWo: wo, summary: `${wo} is already on TEMS's Assign tab - it gets opened after the ticket.` });
+        return;
+      }
+      const assignTwin = seenIn(seenNames);
+      if (cloudTwin || assignTwin) {
+        const name = cloudTwin || assignTwin, where = cloudTwin ? "cloud" : "assign";
+        debugLog(`${wo} not in TEMS, but ${name} is (${where}) - using that`);
+        finish({ ok: true, found: where, matchedWo: name,
+          summary: `TEMS has ${name} (not ${wo}) ${where === "cloud" ? `in Cloud (${project})` : "on Assign"} - using that.` });
         return;
       }
       const suggestions = suggestionsFor(wo);

@@ -13,7 +13,7 @@ import urllib.parse
 
 from .chromeBridge import ChromeBridgeError, StoppedError, openInChrome, registerFiles, runInChrome
 from .config import actixExtraEmail as extraEmail  # all from .env
-from .config import actixSubmit, actixUploadUrl, equipments, microsoftAccount
+from .config import actixSubmit, actixUploadUrl, closeTabsWhenDone, equipments, microsoftAccount
 from .logFiles import LogFilesError, findLatestLogFiles
 
 
@@ -32,7 +32,7 @@ def prepareActixUpload(wo, equipment="EQ3", submit=actixSubmit, url=actixUploadU
         registerFiles(requestId, files)
         return f"{url}#" + urllib.parse.urlencode({
             "kaamLogin": requestId, "kaamAccount": account, "kaamEmail": email,
-            "kaamFiles": ",".join(f.name for f in files), "kaamSubmit": "1" if submit else "0",
+            "kaamFiles": ",".join(f.name for f in files), "kaamSubmit": "1" if submit else "0", "kaamClose": "1" if closeTabsWhenDone else "0",
         })
 
     message = runInChrome(
