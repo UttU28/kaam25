@@ -207,7 +207,7 @@ export function setWhatsappSend(on) {
   try { localStorage.setItem(whatsappSendKey, on ? "1" : "0"); } catch { /* storage blocked */ }
 }
 
-// fn() runs whenever the saved data changes (any page, tab, Chrome job or the desktop app),
+// fn() runs whenever the saved data changes (any page, tab or Chrome job),
 // not on the first call. Returns the unsubscribe function - hand it back as a page's cleanup.
 export function onDataChange(fn) {
   let seen = store.state?.dataVersion;

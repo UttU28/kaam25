@@ -8,7 +8,7 @@ const extensionVersion = chrome.runtime.getManifest().version;
 
 // Keep equal to "version" in manifest.json. Chrome can keep running an old saved copy of this
 // file after an update (seen across a Chrome restart); when it does, reload to get the new code.
-const backgroundBuild = "3.17";
+const backgroundBuild = "3.18";
 if (extensionVersion !== backgroundBuild) chrome.runtime.reload();
 
 // Sends to the app. If the app says our files changed on disk, reload to pick them up.
@@ -218,23 +218,48 @@ async function startTems(message, triggerTab) {
   let temsUrl;
   try { temsUrl = new URL(message.data.url); } catch { return done(`Not a web address: ${message.data.url}`); }
   const urlStart = `${temsUrl.origin}/`;
+  // TEMS is "there" once its side menu (Cloud / Assign ...) has rendered in the tab.
+  const temsReady = async (tabId, timeoutMs) => {
+    if (!(await waitForTabLoaded(tabId, timeoutMs, urlStart))) return false;
+    const end = Date.now() + timeoutMs;
+    while (Date.now() < end) {
+      const [probe] = await chrome.scripting.executeScript({
+        target: { tabId }, func: () => !!document.querySelector('[class*="SideMenuButton_menu-button"]'),
+      }).catch(() => []);
+      if (probe?.result) return true;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    return false;
+  };
+
+  let tabId = null;
   const openTabs = await chrome.tabs.query({ url: `${temsUrl.origin}/*` });
   // Prefer the TEMS tab you're looking at, then any TEMS tab.
   const openTab = openTabs.find((tab) => tab.active) || openTabs[0];
-  let tabId;
   if (openTab) {
-    tabId = openTab.id;
-    await chrome.tabs.update(tabId, { active: true });
+    await chrome.tabs.update(openTab.id, { active: true });
     await chrome.windows.update(openTab.windowId, { focused: true });
-    chrome.tabs.remove(triggerTab.id).catch(() => {});
     debugLog(`tems: using the open TEMS tab (${openTab.discarded ? "asleep" : openTab.status})`, openTab);
-    await new Promise((resolve) => setTimeout(resolve, 600));
+    if (await temsReady(openTab.id, 15000)) tabId = openTab.id;
+    else {
+      // Open but TEMS isn't showing (error page, stuck, asleep): reload it once.
+      debugLog("tems: TEMS isn't showing in that tab - reloading it", openTab);
+      await chrome.tabs.reload(openTab.id).catch(() => {});
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      if (await temsReady(openTab.id, 25000)) tabId = openTab.id;
+      else debugLog("tems: still not showing after a reload - opening TEMS in a new tab", openTab);
+    }
   } else {
-    tabId = triggerTab.id;
-    await chrome.tabs.update(tabId, { url: temsUrl.href, active: true });
     debugLog("tems: no TEMS tab open, opening one", triggerTab);
   }
-  if (!(await waitForTabLoaded(tabId, 60000, urlStart))) return done(`TEMS Paragon didn't load at ${temsUrl.href}. Is it running?`);
+  if (tabId) {
+    chrome.tabs.remove(triggerTab.id).catch(() => {});
+  } else {
+    // No usable TEMS tab: turn the app's little page into a new TEMS tab.
+    tabId = triggerTab.id;
+    await chrome.tabs.update(tabId, { url: temsUrl.href, active: true });
+    if (!(await temsReady(tabId, 60000))) return done(`TEMS Paragon didn't load at ${temsUrl.href}. Is TEMS Paragon running?`);
+  }
   await setJob(tabId, { kind: "tems", requestId: message.requestId, data: message.data, startedAt: Date.now() });
   try {
     await chrome.scripting.executeScript({ target: { tabId }, files: ["temsParagon.js"] });

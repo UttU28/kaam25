@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Kaam25 Helper",
-  "version": "3.17",
-  "description": "Finds ticket IDs on TechInsights, uploads on ActixOne, logs in to TEMS Cloud and shares results on WhatsApp Web for the Kaam25 app.",
+  "version": "3.18",
+  "description": "Finds ticket IDs on TechInsights, uploads on ActixOne, logs in to TEMS Cloud and shares results on WhatsApp Web for Kaam25: 13 Bhai gaadi chalayega.",
   "background": { "service_worker": "background.js" },
   "permissions": ["storage", "debugger", "scripting", "alarms"],
   "content_scripts": [

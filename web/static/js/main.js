@@ -62,7 +62,7 @@ async function route() {
   currentName = name;
   $("#pageTitle").textContent = page.title;
   $("#pageSub").textContent = typeof page.sub === "function" ? page.sub() : page.sub || "";
-  document.title = `${page.title} · Kaam25`;
+  document.title = `${page.title} · Kaam25: 13 Bhai gaadi chalayega`;
   renderNav();
   $("#sidebar").classList.remove("open");
   $("#modalRoot").innerHTML = "";  // a question from the previous page doesn't belong here

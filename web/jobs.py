@@ -1,7 +1,7 @@
 """Background jobs for the long Chrome tasks (create ticket, End uploads, Close, WhatsApp).
 
 A job runs in a thread; the browser polls /api/jobs/<id> for its progress lines and result.
-Stop (stopAll) ends whatever is waiting on Chrome, like the desktop app's Stop button.
+Stop (stopAll) ends whatever is waiting on Chrome - the Stop button.
 """
 
 import secrets

@@ -143,7 +143,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         triggerPages = {"/whatsapp": ("WhatsApp", "Sending to WhatsApp…"), "/tems": ("TEMS", "Opening TEMS…")}
         page = triggerPages.get(self.path.split("?")[0].split("#")[0])
         if page:
-            body = (f"<!doctype html><meta charset='utf-8'><title>Kaam25 - {page[0]}</title>"
+            body = (f"<!doctype html><meta charset='utf-8'><title>Kaam25: 13 Bhai gaadi chalayega - {page[0]}</title>"
                     "<body style='background:#0f1115;color:#8a91a0;font:14px Segoe UI;padding:40px'>"
                     f"{page[1]}</body>").encode()
             self.send_response(200)
@@ -227,8 +227,8 @@ def startBridge():
     global bridgeServer, bridgeError
     if bridgeServer:
         return
-    busyMessage = (f"Port {bridgePort} is busy. Is another copy of Kaam25 open (the desktop app or "
-                   "another web server)? Close it and try again.")
+    busyMessage = (f"Port {bridgePort} is busy. Is another copy of Kaam25 already running? "
+                   "Close it and try again.")
     try:
         socket.create_connection(("127.0.0.1", bridgePort), timeout=0.3).close()
         bridgeError = busyMessage

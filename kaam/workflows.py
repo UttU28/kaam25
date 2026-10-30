@@ -1,6 +1,6 @@
 """The Start / End / Close / WhatsApp workflows, without any UI.
 
-Every function here does exactly what the desktop app's pages did (same checks, same saves to
+Every function here does the work behind the web pages (same checks, same saves to
 tickets.json, same history lines). Long ones take `progress(text)` and `post(kind, value)`
 callbacks so a caller (the web app's job runner) can show live progress.
 """

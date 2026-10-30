@@ -160,7 +160,7 @@ def state():
     pmFrom = datetime.combine(datetime.now().date(), config.driveShiftPmFrom)
     return jsonify({
         "now": datetime.now().isoformat(timespec="seconds"),
-        # Changes whenever tickets.json does (from any page, tab or the desktop app): pages refresh on it.
+        # Changes whenever tickets.json does (from any page, tab or Chrome job): pages refresh on it.
         "dataVersion": "-".join(map(str, fileStamp() or ())) + "|" + datetime.now().date().isoformat(),
         "employeeId": config.employeeId,
         "shift": currentDriveShift(), "pmFrom": pmFrom.strftime("%I:%M %p").lstrip("0"),
