@@ -26,3 +26,6 @@ __pycache__/
 .claude/
 Thumbs.db
 desktop.ini
+
+# Route map with WO locations (work data)
+ticket_route_map.html

@@ -36,5 +36,17 @@ if not exist ".env" (
   exit /b 0
 )
 
-"venv\Scripts\python.exe" -m web.server
+rem Exit code 75 = Settings saved .env and asked for a restart: start again in this window.
+set KAAM_LAUNCHER=1
+set KAAM_ARGS=
+:run
+"venv\Scripts\python.exe" -m web.server %KAAM_ARGS%
+if %errorlevel%==75 goto restart
 if errorlevel 1 pause
+goto :eof
+
+:restart
+echo.
+echo Restarting with the new settings ...
+set KAAM_ARGS=--after-restart
+goto run

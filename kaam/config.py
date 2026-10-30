@@ -54,8 +54,10 @@ actixUploadUrl = getSetting("ACTIX_UPLOAD_URL").strip()
 temsUrl = (os.environ.get("TEMS_URL") or "http://localhost:8080/").strip()
 # The TEMS Cloud project whose list holds the WOs to reserve (changes with the month).
 temsProject = (os.environ.get("TEMS_PROJECT") or "SR_Y6_Oct_26_LM_Nokia").strip()
-# Testing: the WO opened on TEMS's Assign tab (until reserving is live it can't be the reserved one).
-# Set TEMS_ASSIGN_WO=same in .env to use the WO you reserve.
+# TEMS test mode: after a start, ask for a Cloud WO and an Assign WO and only check the Reserve /
+# Open buttons (nothing clicked). Off (prod, default): Reserve and Open the started WO for real.
+temsTestMode = (os.environ.get("TEMS_TEST_MODE") or "false").strip().lower() in ("1", "true", "yes", "on")
+# Test mode only: the Assign WO the popup starts with.
 temsAssignWo = (os.environ.get("TEMS_ASSIGN_WO") or "SO-LM-HN-02-9_G23d_2U_102326_NOKIA").strip()
 
 # ---------- you ----------

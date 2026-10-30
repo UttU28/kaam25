@@ -107,6 +107,36 @@ export function modal({ title, body, buttons = [{ label: "OK", value: true, cls:
     $(".mActions .btn:last-child", node)?.focus();
   });
 }
+// A popup with input boxes. fields: [{name, label, value, readonly, help}].
+// Resolves {action, values: {name: text}} - action is the clicked button's value (null on Esc).
+export function formModal({ title, body = "", fields = [], buttons }) {
+  return new Promise((resolve) => {
+    const root = $("#modalRoot");
+    const node = h(`<div class="backdrop"><div class="modal" role="dialog" aria-modal="true">
+        <h3>${esc(title)}</h3><div class="mBody">${body}</div>
+        <div class="stack" style="margin-top:12px">${fields.map((f) => `<div class="field">
+            <label class="label">${esc(f.label)}</label>
+            <input class="input mono" data-name="${esc(f.name)}" value="${esc(f.value || "")}" spellcheck="false" autocomplete="off" ${f.readonly ? "readonly" : ""}>
+            ${f.help ? `<div class="note" style="margin-top:4px">${esc(f.help)}</div>` : ""}</div>`).join("")}</div>
+        <div class="mActions">${buttons.map((b, n) => `<button class="btn ${b.cls || "btnGhost"}" data-n="${n}">${esc(b.label)}</button>`).join("")}</div>
+      </div></div>`);
+    const values = () => Object.fromEntries([...node.querySelectorAll("input[data-name]")].map((i) => [i.dataset.name, i.value.trim()]));
+    const close = (action) => { const v = values(); node.remove(); document.removeEventListener("keydown", onKey, true); resolve({ action, values: v }); };
+    const onKey = (event) => {
+      if (event.key === "Escape") { event.stopPropagation(); close(null); }
+      if (event.key === "Enter" && event.target.matches?.("input[data-name]")) { event.preventDefault(); close(buttons[buttons.length - 1].value); }
+    };
+    node.addEventListener("click", (event) => {
+      if (event.target === node) return close(null);
+      const button = event.target.closest("[data-n]");
+      if (button) close(buttons[+button.dataset.n].value);
+    });
+    document.addEventListener("keydown", onKey, true);
+    root.append(node);
+    const first = node.querySelector("input[data-name]:not([readonly])");
+    if (first) { first.focus(); first.select(); }
+  });
+}
 export const confirmBox = (title, body, okLabel = "OK", okCls = "btnPrimary") =>
   modal({ title, body, buttons: [{ label: "Cancel", value: false }, { label: okLabel, value: true, cls: okCls }] });
 

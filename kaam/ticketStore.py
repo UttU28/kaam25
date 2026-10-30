@@ -196,17 +196,22 @@ def deleteRecord(wo):
         record = tickets.pop(key, None)
         if record is None:
             return False
-        trash = ticketStoreFile.with_name(f"{ticketStoreFile.stem}.deleted.json")
-        try:
-            deleted = json.loads(trash.read_text(encoding="utf-8")) if trash.exists() else []
-        except ValueError:
-            deleted = []
-        if not isinstance(deleted, list):
-            deleted = []
-        deleted.append({"deletedAt": now(), "record": record})
-        trash.write_text(json.dumps(deleted, indent=2, ensure_ascii=False), encoding="utf-8")
+        keepDeletedCopy(record)
         writeFile(tickets)
     return True
+
+
+def keepDeletedCopy(record):
+    """Add a removed record to tickets.deleted.json (call with storeLock held)."""
+    trash = ticketStoreFile.with_name(f"{ticketStoreFile.stem}.deleted.json")
+    try:
+        deleted = json.loads(trash.read_text(encoding="utf-8")) if trash.exists() else []
+    except ValueError:
+        deleted = []
+    if not isinstance(deleted, list):
+        deleted = []
+    deleted.append({"deletedAt": now(), "record": record})
+    trash.write_text(json.dumps(deleted, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 def getRecord(wo):
@@ -214,18 +219,58 @@ def getRecord(wo):
         return readFile().get(woKey(wo))
 
 
+renamePattern = re.compile(r"^Renamed WO: (.+?) -> (.+)$")
+
+
+def aliasKeys(record):
+    """Keys of the names a record had before it was renamed (G23d -> G23e etc.), so a plan that still
+    lists the old name updates this record instead of adding a copy. Older renames only saved the
+    changed part ("G23d -> G23e"); the old full name is rebuilt from the current one."""
+    keys = {woKey(alias) for alias in record.get("aliases") or []}
+    wo = record.get("wo") or ""
+    for entry in record.get("history") or []:
+        match = renamePattern.match(entry.get("event") or "")
+        if not match:
+            continue
+        old, new = match.group(1).strip(), match.group(2).strip()
+        if new in wo:
+            keys.add(woKey(wo.replace(new, old)) if woKey(new) != woKey(wo) else woKey(old))
+    keys.discard(woKey(wo))
+    keys.discard("")
+    return keys
+
+
 def importWorkOrders(rows, sourceName):
     """Save sheet rows (wo, gridKey, lat, long, cluster, ...) in one write. Existing records
     keep their progress; only the sheet's fields are added or refreshed.
+    The sheet's spelling wins: a not-started record that was renamed earlier (G23d -> G23e) goes back
+    to the sheet's name - only Start's TEMS check changes it again, when TEMS really has it
+    differently. A started one keeps its name (no copy is added).
     Returns (added, updated, alreadyStarted) counts."""
     added = updated = alreadyStarted = 0
     with storeLock:
         tickets = readFile()
+        renamed = {alias: key for key, record in tickets.items() for alias in aliasKeys(record)}
         stamp = now()
         for order, row in enumerate(rows):
             key = woKey(row.get("wo"))
             if not key:
                 continue
+            if key not in tickets and renamed.get(key) in tickets:
+                oldKey = renamed[key]
+                if tickets[oldKey].get("startedAt"):
+                    key = oldKey  # finished / in progress under the TEMS name: leave it as it is
+                else:
+                    record = tickets.pop(oldKey)
+                    before, sheetWo = record.get("wo") or "", row["wo"].strip()
+                    for field in ("folderName", "report"):
+                        if isinstance(record.get(field), str):
+                            record[field] = record[field].replace(before, sheetWo)
+                    record["wo"] = sheetWo
+                    record["aliases"] = [a for a in record.get("aliases") or [] if woKey(a) != key]
+                    record.setdefault("history", []).append(
+                        {"at": stamp, "event": f"Back to the sheet's name: {before} -> {sheetWo}"})
+                    tickets[key] = record
             record = tickets.get(key)
             if record is None:
                 record = {"wo": row["wo"].strip(), "createdAt": stamp, "history": []}
@@ -241,6 +286,53 @@ def importWorkOrders(rows, sourceName):
             tickets[key] = record
         writeFile(tickets)
     return added, updated, alreadyStarted
+
+
+def renameWo(oldWo, newWo):
+    """Correct a WO's name (e.g. G23d -> G23e when TEMS has it differently). The record moves to
+    the new name; its saved text (folder name, report) follows. Returns the record, or None when
+    the old WO isn't in Records. The old name is remembered ("aliases") so a plan that still lists it
+    doesn't add it again.
+    The new name already has its own record (e.g. a plan re-added the old name next to the renamed
+    one): the old one is dropped (a copy goes to tickets.deleted.json) if it was never started, and
+    the existing record is returned; a started old record is refused."""
+    oldKey, newKey = woKey(oldWo), woKey(newWo)
+    if not newKey:
+        raise TicketStoreError("Enter the corrected WO.")
+    with storeLock:
+        tickets = readFile()
+        record = tickets.get(oldKey)
+        if record is None:
+            return None
+        if newKey != oldKey and newKey in tickets:
+            if record.get("startedAt"):
+                raise TicketStoreError(f"{newWo.strip()} is already in Records, and {record.get('wo') or oldWo} "
+                                       "was already started - pick the right one in Records.")
+            existing = tickets[newKey]
+            stamp = now()
+            existing["aliases"] = sorted(set(existing.get("aliases") or []) | {record.get("wo") or oldWo})
+            existing["updatedAt"] = stamp
+            existing.setdefault("history", []).append(
+                {"at": stamp, "event": f"Same WO as {record.get('wo') or oldWo} (copy removed)"})
+            existing["history"] = existing["history"][-maxHistory:]
+            keepDeletedCopy(tickets.pop(oldKey))
+            writeFile(tickets)
+            return dict(existing)
+        before = record.get("wo") or oldWo
+        newWo = newWo.strip()
+        record["aliases"] = sorted(set(record.get("aliases") or []) | {before})
+        for field in ("wo", "folderName", "report"):
+            if isinstance(record.get(field), str):
+                record[field] = record[field].replace(before, newWo)
+        record["wo"] = newWo
+        stamp = now()
+        record["updatedAt"] = stamp
+        record.setdefault("history", []).append({"at": stamp, "event": f"Renamed WO: {before} -> {newWo}"})
+        record["history"] = record["history"][-maxHistory:]
+        tickets.pop(oldKey)
+        tickets[newKey] = record
+        writeFile(tickets)
+        return dict(record)
 
 
 def moveToToday(wos):
@@ -266,15 +358,20 @@ def moveToToday(wos):
     return moved
 
 
-def notStartedRecords():
+def notStartedRecords(onlyToday=True):
     """Imported but not started yet, in sheet order (latest import first) - Start Ticket's list.
-    A WO moved to today counts as imported at that moment, so it sits with today's plan."""
+    A WO moved to today counts as imported at that moment, so it sits with today's plan.
+    onlyToday: just the ones imported or moved to today; older pending WOs stay in Records until
+    you move them to today."""
     with storeLock:
         records = list(readFile().values())
-    waiting = [record for record in records if record.get("importedAt") and not record.get("startedAt")]
 
     def listedAt(record):
         return max(record["importedAt"], record.get("movedToDayAt") or "")
+
+    today = datetime.now().date().isoformat()
+    waiting = [record for record in records if record.get("importedAt") and not record.get("startedAt")
+               and (not onlyToday or listedAt(record).startswith(today))]
 
     return sorted(waiting, key=lambda record: (-datetime.fromisoformat(listedAt(record)).timestamp(),
                                                record.get("importOrder", 0)))

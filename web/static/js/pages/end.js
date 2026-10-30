@@ -154,7 +154,7 @@ export default {
     function update() {
       const f = fields();
       q(".report").textContent = formatReport(f);
-      q(".fFolder").value = f.wo ? (record?.folderName && record.wo === f.wo ? record.folderName : folderName(f.wo)) : "";
+      q(".fFolder").value = f.wo ? (record?.folderName && String(record.wo).replace(/\s+/g, "").toLowerCase() === String(f.wo).replace(/\s+/g, "").toLowerCase() ? record.folderName : folderName(f.wo)) : "";
       const run = q(".run");
       run.innerHTML = isLocal() ? `${icon("upload", "sm")}<span>Upload</span>` : `${icon("search", "sm")}<span>Find in Chrome</span>`;
       run.disabled = busy || !f.wo;

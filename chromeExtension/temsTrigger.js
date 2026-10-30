@@ -8,8 +8,8 @@
     type: "temsStart", requestId,
     data: {
       url: params.get("kaamUrl") || "http://localhost:8080/",
-      wo: params.get("kaamWo") || "", project: params.get("kaamProject") || "",
-      assignWo: params.get("kaamAssignWo") || "",
+      action: params.get("kaamAction") || "test", wo: params.get("kaamWo") || "", project: params.get("kaamProject") || "",
+      cloudWo: params.get("kaamCloudWo") || "", assignWo: params.get("kaamAssignWo") || "",
     },
   });
 })();

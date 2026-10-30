@@ -52,6 +52,7 @@
   const ticketsPath = new URL(ticketsUrl).pathname;
 
   const isVisible = (el) => !!el && el.getClientRects().length > 0;
+  const squashWo = (text) => String(text || "").replace(/\s+/g, "").toLowerCase();
   const debugLog = (text) => chrome.runtime.sendMessage({ type: "log", text }).catch(() => {});
   debugLog(`ticket job running on ${location.pathname}`);
   let timer = null;
@@ -73,12 +74,13 @@
   };
 
   // Every ticket ID on the page whose row mentions the WO, top (newest) first.
+  // Spaces and case are ignored, so "LM_136_ G23e" and "LM_136_G23e" / "LM_136_  G23e" all match.
   const ticketIdsForWo = () => {
-    const needle = wo.toLowerCase();
+    const needle = squashWo(wo);
     const ids = [];
     for (const row of document.querySelectorAll('tr, [role="row"]')) {
       const titles = Array.from(row.querySelectorAll("[title]")).map((e) => e.getAttribute("title"));
-      const text = ((row.innerText || "") + " " + titles.join(" ")).toLowerCase();
+      const text = squashWo((row.innerText || "") + " " + titles.join(" "));
       if (!text.includes(needle)) continue;
       const id = rowTicketId(row);
       if (id && !ids.includes(id)) ids.push(id);
@@ -98,7 +100,10 @@
     const searchBox = document.querySelector('input[placeholder^="Search"]');
     if (!searchBox) return false;
     const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
-    setValue.call(searchBox, wo);
+    // Search the longest space-free part of the WO, so a different spacing on the site still matches;
+    // rows are then checked against the whole WO (spaces ignored).
+    const term = wo.split(/\s+/).sort((a, b) => b.length - a.length)[0] || wo;
+    setValue.call(searchBox, term);
     searchBox.dispatchEvent(new Event("input", { bubbles: true }));
     searchBox.dispatchEvent(new Event("change", { bubbles: true }));
     for (const type of ["keydown", "keypress", "keyup"]) {
@@ -270,7 +275,7 @@
   const findTicketRow = () => {
     const rows = Array.from(document.querySelectorAll('tr[role="row"], tr.k-master-row'));
     if (ticketIdWanted) return rows.find((row) => rowTicketId(row) === ticketIdWanted) || null;
-    return rows.find((row) => (row.innerText || "").toLowerCase().includes(wo.toLowerCase())) || null;
+    return rows.find((row) => squashWo(row.innerText).includes(squashWo(wo))) || null;
   };
   const visibleSheet = () => Array.from(document.querySelectorAll(".sheet-modal")).find(isVisible) || null;
   const buttonWithText = (root, pattern) => Array.from(root.querySelectorAll('button, [role="button"]'))

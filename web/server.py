@@ -19,20 +19,21 @@ if str(projectDir) not in sys.path:
 
 from flask import Flask, jsonify, request, send_from_directory  # noqa: E402
 
-from kaam import config, workflows  # noqa: E402
+from kaam import config, envSettings, workflows  # noqa: E402
 from kaam.chromeBridge import ChromeBridgeError, bridgeStatus, startBridge, stopAll  # noqa: E402
 from kaam.gridSummary import buildFolderName, showInExplorer  # noqa: E402
 from kaam.sheetImport import SheetImportError  # noqa: E402
-from kaam.temsParagon import assignWoFor, openTemsCloud  # noqa: E402
+from kaam.temsParagon import actions as temsActions, runTems  # noqa: E402
 from kaam.ticketLookup import currentDriveShift  # noqa: E402
 from kaam.ticketStore import (TicketStoreError, cloudStartToday, deleteRecord, fileStamp, getRecord,  # noqa: E402
                               isLocalStart, localTicketId, moveToToday, nextLocalNumber, notStartedRecords,
-                              openTicketsToday, searchRecords, woKey)
+                              openTicketsToday, renameWo, searchRecords, woKey)
 from kaam.workflows import WorkflowError  # noqa: E402
 
 from web.jobs import getJob, listJobs, startJob  # noqa: E402
 
 staticDir = Path(__file__).resolve().parent / "static"
+bootedAt = datetime.now().isoformat(timespec="seconds") + f".{os.getpid()}"
 app = Flask(__name__, static_folder=None)
 app.json.ensure_ascii = False
 app.json.sort_keys = False
@@ -160,6 +161,7 @@ def state():
     pmFrom = datetime.combine(datetime.now().date(), config.driveShiftPmFrom)
     return jsonify({
         "now": datetime.now().isoformat(timespec="seconds"),
+        "bootedAt": bootedAt,  # changes after a restart (Settings waits for it)
         # Changes whenever tickets.json does (from any page, tab or Chrome job): pages refresh on it.
         "dataVersion": "-".join(map(str, fileStamp() or ())) + "|" + datetime.now().date().isoformat(),
         "employeeId": config.employeeId,
@@ -192,6 +194,7 @@ def settings():
         "statusOptions": workflows.statusOptions, "equipments": config.equipments,
         "folderNamePrefix": config.folderNamePrefix, "whatsappGroup": config.whatsappGroup,
         "whatsappSend": config.whatsappSend, "whatsappRetries": config.whatsappRetries,
+        "temsTestMode": config.temsTestMode, "temsProject": config.temsProject, "temsAssignWo": config.temsAssignWo,
         "actixSubmit": config.actixSubmit, "closeTabsWhenDone": config.closeTabsWhenDone,
         "paths": {"Tickets file": str(config.ticketStoreFile), "Drive logs": str(config.logRootDir),
                   "Work order output": str(config.workOrderOutputDir), "Debug log": str(config.debugLogPath),
@@ -200,6 +203,42 @@ def settings():
                  "Apeksha": config.apekshaUrl},
         "bridge": bridgeStatus(),
     })
+
+
+@app.get("/api/settings/env")
+def settingsEnv():
+    """Every .env setting with its current value, type and help, for the Settings form."""
+    return jsonify({"fields": envSettings.describe(), "envPath": str(config.envPath),
+                    "history": envSettings.readHistory()})
+
+
+@app.post("/api/settings/env")
+def settingsEnvSave():
+    """Save changed settings into .env (nothing is written if any value is wrong)."""
+    try:
+        return jsonify(envSettings.save(body().get("changes") or {}))
+    except envSettings.SettingsError as error:
+        return fail(str(error))
+
+
+@app.post("/api/restart")
+def restart():
+    """Restart the app so new .env values take effect. Started from runWeb.bat: it exits with
+    code 75 and the launcher starts it again in the same window. Started by hand: it starts a
+    new copy of itself, then exits."""
+    viaLauncher = os.environ.get("KAAM_LAUNCHER") == "1"
+
+    def later():
+        stopAll()
+        if not viaLauncher:
+            import subprocess
+            flags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+            subprocess.Popen([sys.executable, "-m", "web.server", "--after-restart"],
+                             cwd=str(config.appDir), creationflags=flags)
+        os._exit(75 if viaLauncher else 0)
+
+    threading.Timer(0.6, later).start()
+    return jsonify({"restarting": True, "bootedAt": bootedAt})
 
 
 @app.get("/api/resolve")
@@ -247,6 +286,21 @@ def recordsMoveToday():
     wos = body().get("wos") or []
     moved = moveToToday(wos)
     return jsonify({"moved": moved})
+
+
+@app.post("/api/records/rename")
+def recordsRename():
+    """Correct a WO's name (Start's "WO not in TEMS" popup). Not in Records yet: nothing to rename."""
+    data = body()
+    oldWo = workflows.cleanWorkOrder(data.get("oldWo", ""))
+    newWo = workflows.cleanWorkOrder(data.get("newWo", ""))
+    if not newWo:
+        return fail("Enter the corrected WO.")
+    try:
+        record = renameWo(oldWo, newWo)
+    except TicketStoreError as error:
+        return fail(str(error))
+    return jsonify({"wo": newWo, "renamed": record is not None, "record": detail(record) if record else None})
 
 
 @app.post("/api/records/<path:wo>/openFile")
@@ -410,18 +464,36 @@ def whatsapp():
 
 @app.post("/api/tems")
 def tems():
-    """TEMS Paragon in Chrome: Cloud tab, TEMS Cloud login if needed, then (with a WO) open the
-    project, find the WO and check Reserve - not clicked yet."""
-    wo = workflows.cleanWorkOrder(body().get("wo", ""))
+    """TEMS Paragon in Chrome (Cloud tab, TEMS Cloud login if needed), then
+    find: is the WO in TEMS (Cloud list or Assign)?  go: Reserve + Open it (prod).
+    test: check Reserve for cloudWo and Open for assignWo, click nothing.
+    The job's result carries ok / summary / error / found / notFound."""
+    data = body()
+    action = data.get("action") or "find"
+    if action not in temsActions:
+        return fail(f"Unknown TEMS action {action}.")
+    wo = workflows.cleanWorkOrder(data.get("wo", ""))
+    cloudWo = workflows.cleanWorkOrder(data.get("cloudWo", ""))
+    assignWo = workflows.cleanWorkOrder(data.get("assignWo", ""))
+    if action != "test" and not wo:
+        return fail("Enter a WO first.")
+    if action == "test" and not (cloudWo or assignWo):
+        return fail("Enter a Cloud WO or an Assign WO to test.")
 
     def work(job):
-        job.progress(f"Opening TEMS Paragon ({config.temsUrl}) in your Chrome…")
-        job.progress("Cloud tab → Log in if needed (Chrome fills your saved password)…")
-        if wo:
-            job.progress(f"Then project {config.temsProject} → find {wo} → check Reserve (not clicked)…")
-            job.progress(f"Then Assign → open {assignWoFor(wo)} → check Open (not clicked)…")
-        return {"ok": True, "summary": openTemsCloud(wo)}
-    job = startJob("tems", wo, f"TEMS {wo}" if wo else "TEMS Cloud login", work)
+        job.progress(f"Opening TEMS Paragon ({config.temsUrl}) in your Chrome… (Cloud tab, Log in if needed)")
+        if action == "find":
+            job.progress(f"Looking for {wo} in TEMS Cloud ({config.temsProject}), then on Assign…")
+        elif action == "go":
+            job.progress(f"{wo}: Reserve in TEMS Cloud ({config.temsProject}), then Open on Assign…")
+        else:
+            job.progress(f"TEST - nothing is clicked. Reserve for {cloudWo or '-'}, Open for {assignWo or '-'}…")
+        result = runTems(action, wo=wo, cloudWo=cloudWo, assignWo=assignWo)
+        if wo and action == "go" and result.get("ok"):
+            workflows.safeSave(wo, event=result.get("summary") or "TEMS: reserved and opened")
+        return result
+    title = {"find": f"TEMS: find {wo}", "go": f"TEMS: reserve + open {wo}", "test": "TEMS test"}[action]
+    job = startJob("tems", wo or cloudWo or assignWo, title, work)
     return jsonify({"job": job.toJson()})
 
 
@@ -490,12 +562,19 @@ def findRunningApp(preferred=5000):
 
 def main():
     preferred = int(os.environ.get("KAAM_PORT") or 5000)
-    running = findRunningApp(preferred)
-    if running:  # double-clicked again: show the open app instead of starting a second copy
-        print(f"Kaam25 is already running on {running} - opening it.")
-        if "--no-browser" not in sys.argv:
-            webbrowser.open(running)
-        return
+    afterRestart = "--after-restart" in sys.argv  # Settings saved .env: the page is already open
+    if afterRestart:
+        import time
+        deadline = time.time() + 10  # come back on the same port once the old copy has let go
+        while time.time() < deadline and not (isPortFree(preferred) and isPortFree(config.bridgePort)):
+            time.sleep(0.2)
+    else:
+        running = findRunningApp(preferred)
+        if running:  # double-clicked again: show the open app instead of starting a second copy
+            print(f"Kaam25 is already running on {running} - opening it.")
+            if "--no-browser" not in sys.argv:
+                webbrowser.open(running)
+            return
     port = pickPort(preferred)
     try:
         startBridge()  # the Chrome extension talks to this; also shows "connected" in the UI
@@ -503,7 +582,7 @@ def main():
         print(f"! Chrome bridge not started: {error}")
     url = f"http://127.0.0.1:{port}"
     print(f"Kaam25 web is running on {url}  (Ctrl+C to stop)")
-    if "--no-browser" not in sys.argv:
+    if "--no-browser" not in sys.argv and not afterRestart:
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
     app.run(host="127.0.0.1", port=port, threaded=True, use_reloader=False, debug=False)
 

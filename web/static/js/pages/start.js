@@ -1,5 +1,5 @@
 // Start: one cloud start a day (real TechInsights ticket), local starts (LM_N_date) after it.
-import { $, api, copyWithFlash, enc, esc, icon, modal, onDataChange, refreshState, store, toast } from "../core.js";
+import { $, api, copyWithFlash, enc, esc, formModal, icon, modal, onDataChange, refreshState, store, toast } from "../core.js";
 import { jobPanel, locationCard, seg, switchEl, woBox } from "../components.js";
 
 export default {
@@ -24,7 +24,6 @@ export default {
                 <div class="submitSlot"></div>
               </div>
               <div class="row"><button class="btn btnPrimary lg block go"></button></div>
-              <div class="row"><button class="btn btnGhost lg block tems" title="Open TEMS Paragon's Cloud tab in Chrome and log in to TEMS Cloud if needed">${icon("cloud")}<span>TEMS</span></button></div>
               <div class="msg"></div>
               <div class="jobSlot"></div>
             </div>
@@ -68,7 +67,7 @@ export default {
     const box = woBox({
       placeholder: "Paste a WO, grid key or Ticket ID",
       picker: {
-        label: "To start", empty: "Nothing imported to start. Import the day's plan.",
+        label: "To start", empty: "Nothing for today. Import today's plan, or use Move to today in Records for older ones.",
         load: async () => (await api("/api/start/waiting")).map((r) => ({
           wo: r.wo, title: r.cluster || r.wo, sub: r.gridKey ? `${r.gridKey}${r.gridCount > 1 ? ` · ${r.gridCount} grids` : ""}` : r.wo,
         })),
@@ -82,7 +81,7 @@ export default {
           msg(`Matched this WO (${record.startedAt ? "already started" : "not started yet"}).`, "info");
         } else resetMsg();
       },
-      onEnter: () => start(),
+      onEnter: () => startClicked(),
     });
     $(".woSlot", root).replaceWith(box.el);
 
@@ -117,23 +116,26 @@ export default {
       if (!busy && resetMessage) resetMsg();
     }
     function resetMsg() {
-      msg(mode === "local" ? "Marks the WO as started today with an LM_N_date ID instead of a ticket. No TechInsights, nothing opens in Chrome."
-        : submit.get() ? "Creates the ticket in TechInsights (in your Chrome) and gets its ID. Saved to Records."
-        : "Opens Create Ticket in TechInsights and fills it. You click Create yourself.", "info");
+      const tems = store.settings?.temsTestMode
+        ? " Then TEMS test mode: asks for two WOs and only checks Reserve / Open."
+        : " TEMS first checks the WO is there; after the start it's reserved and opened in TEMS.";
+      msg((mode === "local" ? "Marks the WO as started today with an LM_N_date ID instead of a ticket."
+        : submit.get() ? "Creates the ticket in TechInsights (in your Chrome) and gets its ID."
+        : "Opens Create Ticket in TechInsights and fills it. You click Create yourself.") + tems, "info");
     }
 
     async function loadWaiting() {
       let list = [];
       try { list = await api("/api/start/waiting"); } catch (e) { toast(e.message, "bad"); }
       box.setPickerCount(list.length);
-      $(".waitCount", root).textContent = list.length ? `${list.length} imported` : "";
+      $(".waitCount", root).textContent = list.length ? `${list.length} for today` : "";
       $(".waiting", root).innerHTML = list.length ? list.map((r) => `
           <div class="listItem" data-wo="${esc(r.wo)}">
             <div style="min-width:0;flex:1"><div class="t1">${esc(r.cluster || r.wo)}</div><div class="t2">${esc(r.gridKey || r.wo)}${r.gridCount > 1 ? ` · ${r.gridCount} grids` : ""}</div></div>
             ${r.hasLocation ? `<span title="Has a location" style="color:var(--faint)">${icon("pin", "sm")}</span>` : ""}
             <span style="color:var(--faint)">${icon("arrow", "sm")}</span>
           </div>`).join("")
-        : `<div class="empty">${icon("sheet")}<p>Nothing imported to start.</p></div>`;
+        : `<div class="empty">${icon("sheet")}<p>Nothing for today. Import today's plan, or use <b>Move to today</b> in Records for older ones.</p></div>`;
     }
     $(".waiting", root).addEventListener("click", (e) => {
       const item = e.target.closest(".listItem");
@@ -177,24 +179,148 @@ export default {
       $(".resultId", root).textContent = ticketId || "";
       $(".resType", root).textContent = type === "local" ? "Local start · blank on WhatsApp" : "Cloud ticket";
     }
+    // ----- TEMS: checked before the ticket, Reserve + Open after it (test mode: check only) -----
+    const temsTestMode = () => !!store.settings?.temsTestMode;
+    let skipTemsFor = null;  // a WO you chose to start without TEMS
+    async function runTemsJob(request) {
+      const { job: started } = await api("/api/tems", { body: request });
+      return job.run(started);
+    }
+    // Prod, before the ticket: is the WO in TEMS (Cloud list or Assign)? If not, offer to fix
+    // its name. Returns the WO to start (maybe corrected), or null to stop.
+    async function temsCheck(wo) {
+      for (let tries = 0; tries < 5; tries++) {
+        msg(`Checking TEMS for ${wo} first… (TEMS tab in Chrome, logs in if needed)`, "info");
+        let done;
+        try { done = await runTemsJob({ action: "find", wo }); }
+        catch (error) { done = { state: "error", error: error.message }; }
+        if (done.state === "stopped") { msg("Stopped by you.", "bad"); return null; }
+        const r = done.result || {};
+        if (done.state === "done" && r.ok && r.found) { msg(r.summary, "ok"); return wo; }
+        if (done.state !== "done" || !r.ok) {
+          // TEMS couldn't be checked (not running, project missing...): start anyway?
+          const choice = await modal({
+            title: "Couldn't check TEMS",
+            body: `${esc(done.error || r.error || "TEMS didn't answer.")}\n\nStart <b>${esc(wo)}</b> without TEMS (no Reserve / Open), or cancel and fix TEMS first?`,
+            buttons: [{ label: "Cancel", value: null }, { label: "Start without TEMS", value: "skip", cls: "btnAmber" }],
+          });
+          if (choice !== "skip") { msg("Not started - TEMS couldn't be checked.", "warn"); return null; }
+          skipTemsFor = wo;
+          return wo;
+        }
+        // Not in TEMS: maybe the WO is slightly off (G23d vs G23e, a missing letter...).
+        // TEMS has exactly one WO with the same number and date: that's the one - use its spelling
+        // everywhere (Records too) and go on. Several or none: ask.
+        const suggestions = r.suggestions || [];
+        if (suggestions.length === 1) {
+          const fixed = suggestions[0];
+          try {
+            const renamed = await api("/api/records/rename", { body: { oldWo: wo, newWo: fixed } });
+            toast(renamed.renamed ? `TEMS has it as ${fixed} - updated in Records` : `TEMS has it as ${fixed}`, "ok");
+          } catch (error) { msg(error.message, "bad"); return null; }
+          msg(`TEMS has this WO as ${fixed} (not ${wo}) - WO updated, checking again…`, "info");
+          box.set(fixed);
+          wo = fixed;
+          loadWaiting();
+          continue;
+        }
+        const fix = await formModal({
+          title: "WO not found in TEMS",
+          body: `<b>${esc(wo)}</b> isn't in TEMS Cloud (${esc(store.settings?.temsProject || "")}) or on Assign.\n` +
+            (suggestions.length
+              ? `TEMS has <b>${suggestions.map(esc).join("</b>, <b>")}</b> - filled in below. Check it and press Use corrected WO.\n`
+              : "Please check the WO - a letter may be missing or different (like <b>d</b> vs <b>e</b>).\n") +
+            "Type the WO exactly as TEMS shows it; it replaces the current one everywhere (Records too).",
+          fields: [{ name: "current", label: "Current WO", value: wo, readonly: true },
+                   { name: "fixed", label: "Corrected WO", value: suggestions[0] || wo }],
+          buttons: [{ label: "Cancel", value: null }, { label: "Start without TEMS", value: "skip" },
+                    { label: "Use corrected WO", value: "fix", cls: "btnPrimary" }],
+        });
+        if (fix.action === "skip") { skipTemsFor = wo; return wo; }
+        if (fix.action !== "fix" || !fix.values.fixed) { msg("Not started - fix the WO and try again.", "warn"); return null; }
+        const fixed = fix.values.fixed;
+        if (fixed !== wo) {
+          try {
+            const renamed = await api("/api/records/rename", { body: { oldWo: wo, newWo: fixed } });
+            toast(renamed.renamed ? `Renamed in Records: ${wo} → ${fixed}` : `Using ${fixed}`, "ok");
+          } catch (error) { msg(error.message, "bad"); return null; }
+          box.set(fixed);
+          wo = fixed;
+          loadWaiting();
+        }
+      }
+      msg("Still not found in TEMS after several tries - check the WO in TEMS.", "bad");
+      return null;
+    }
+    // After the ticket: prod = Reserve + Open for real; test mode = ask for two WOs, click nothing.
+    async function temsFinish(wo, ticketText) {
+      if (!wo || skipTemsFor === wo) { if (skipTemsFor === wo) msg(`${ticketText} TEMS skipped.`, "warn"); return; }
+      setBusy(true);
+      try {
+        if (temsTestMode()) {
+          let lastAssign = "";
+          try { lastAssign = localStorage.getItem("kaamTemsTestAssignWo") || ""; } catch { /* none */ }
+          const test = await formModal({
+            title: "TEMS test mode - nothing is clicked",
+            body: "Pick a WO for each check. Prod mode (Settings → TEMS) reserves and opens the started WO for real.",
+            fields: [{ name: "cloudWo", label: "Cloud WO (find Reserve)", value: wo },
+                     { name: "assignWo", label: "Assign WO (find Open)", value: lastAssign || store.settings?.temsAssignWo || "" }],
+            buttons: [{ label: "Skip", value: null }, { label: "Run test", value: "run", cls: "btnPrimary" }],
+          });
+          if (test.action !== "run") { msg(`${ticketText} TEMS test skipped.`, "info"); return; }
+          try { localStorage.setItem("kaamTemsTestAssignWo", test.values.assignWo); } catch { /* storage blocked */ }
+          msg(`${ticketText} TEMS test running… (nothing is clicked)`, "info");
+          const done = await runTemsJob({ action: "test", cloudWo: test.values.cloudWo, assignWo: test.values.assignWo });
+          const r = done.result || {};
+          msg(`${ticketText} ${done.state === "done" ? (r.summary || r.error) : done.error || "Stopped."}`, done.state === "done" && r.ok ? "ok" : "bad");
+          return;
+        }
+        msg(`${ticketText} Now TEMS: reserving ${wo} and opening it on Assign…`, "info");
+        const done = await runTemsJob({ action: "go", wo });
+        const r = done.result || {};
+        if (done.state === "done" && r.ok) { msg(`${ticketText} ${r.summary}`, "ok"); toast(`TEMS: ${wo} reserved and opened.`, "ok"); }
+        else msg(`${ticketText} TEMS: ${done.state === "stopped" ? "stopped by you." : r.error || done.error || "didn't finish."}`, "bad");
+      } catch (error) {
+        msg(`${ticketText} TEMS: ${error.message}`, "bad");
+      } finally {
+        setBusy(false);
+      }
+    }
+    // Start button / Enter: TEMS check first (prod), then the ticket, then TEMS.
+    async function startClicked() {
+      let wo = box.get();
+      if (!wo) { msg("Enter a WO first.", "bad"); box.focus(); return; }
+      if (busy) return;
+      skipTemsFor = null;
+      // Always first: find the WO in TEMS (clicks nothing) and take TEMS's spelling (d / e) before
+      // anything is made - then Cloud (TechInsights) or Local, then Reserve + Open in TEMS.
+      setBusy(true);
+      try { wo = await temsCheck(wo); } finally { setBusy(false); }
+      if (!wo) return;
+      await start();
+    }
+
     async function start(force = false, existingTicketId = null) {
       const wo = box.get();
       if (!wo) { msg("Enter a WO first.", "bad"); box.focus(); return; }
       if (busy) return;
       $(".result", root).classList.add("hidden");
       if (mode === "local" && !force) {  // force = re-create the cloud ticket: always cloud
+        let started = null;
         try {
           const r = await api("/api/start", { body: { wo, mode: "local" } });
           msg(r.summary, r.isNew ? "ok" : "warn");
           showResult(r.wo, r.ticketId, "local");
           toast(r.isNew ? `Started ${r.ticketId}` : r.summary, r.isNew ? "ok" : "warn");
+          started = r;
           await refreshState(); paintMode(false); loadWaiting();
         } catch (error) { msg(`Couldn't save the local start: ${error.message}`, "bad"); }
+        if (started) await temsFinish(started.wo, `Local start ${started.ticketId}.`);
         return;
       }
       setBusy(true);
       msg("Opening TechInsights in your Chrome… (watch progress below)", "info");
-      let asking = false;
+      let asking = false, created = null;
       try {
         const { job: started } = await api("/api/start", { body: { wo, mode: "cloud", submit: submit.get(), force, existingTicketId } });
         const done = await job.run(started);
@@ -203,7 +329,7 @@ export default {
         if (r.ask) { asking = true; msg(r.summary, "warn"); setBusy(false); askExisting(r); return; }
         msg(r.summary, "ok");
         showResult(r.wo, r.ticketId, "cloud");
-        if (r.ticketId) toast(`Ticket ${r.ticketId} created.`, "ok");
+        if (r.ticketId) { toast(`Ticket ${r.ticketId} created.`, "ok"); created = r; }
       } catch (error) {
         msg(error.message, "bad");
       } finally {
@@ -212,6 +338,7 @@ export default {
           await refreshState(); autoMode(); loadWaiting();
         }
       }
+      if (created) await temsFinish(created.wo, `Ticket ${created.ticketId} created.`);
     }
     function autoMode() {  // after the day's cloud start, the next ones are local
       if (store.state?.cloudStart) { mode = "local"; modeSeg.set(mode); }
@@ -231,6 +358,7 @@ export default {
           const u = await api("/api/start/useExisting", { body: { wo: r.wo, ticketId: r.ticketId, summary: r.summary } });
           msg(u.summary, "ok"); showResult(u.wo, u.ticketId, "cloud");
           await refreshState(); autoMode(); loadWaiting();
+          await temsFinish(u.wo, `Using ticket ${u.ticketId}.`);
         } catch (error) { msg(error.message, "bad"); }
       } else {
         msg("Nothing changed - the existing ticket wasn't used and no new one was made.", "warn");
@@ -238,22 +366,7 @@ export default {
       }
     }
 
-    $(".go", root).addEventListener("click", () => start());
-    // TEMS (test button for now - later the last step of Start): Cloud tab + TEMS Cloud login.
-    $(".tems", root).addEventListener("click", async (e) => {
-      const button = e.currentTarget;
-      if (busy) return;
-      button.disabled = true;
-      const wo = box.get();
-      msg(`Opening TEMS in your Chrome… (Cloud tab, Log in if needed${wo ? `, then finds ${wo} and checks Reserve - not clicked` : ""})`, "info");
-      try {
-        const { job: started } = await api("/api/tems", { body: { wo } });
-        const done = await job.run(started);
-        if (done.state === "done") { msg(done.result.summary, "ok"); toast(wo ? `TEMS: ${wo} found.` : "TEMS Cloud is ready.", "ok"); }
-        else msg(done.state === "stopped" ? "Stopped by you." : done.error, "bad");
-      } catch (error) { msg(error.message, "bad"); }
-      finally { button.disabled = false; }
-    });
+    $(".go", root).addEventListener("click", () => startClicked());
     $(".copyId", root).addEventListener("click", (e) => copyWithFlash(e.currentTarget, $(".resultId", root).textContent));
     $(".toEnd", root).addEventListener("click", () => { location.hash = `#/end?wo=${encodeURIComponent(lastWo)}`; });
     $(".next", root).addEventListener("click", () => {

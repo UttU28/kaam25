@@ -110,6 +110,9 @@
   };
   const reserveButton = () => [...(detailsCard()?.querySelectorAll('a, button, [role="button"]') || [])]
     .find((el) => isVisible(el) && /^reserve$/i.test(textOf(el))) || null;
+  // After Reserve works, TEMS changes that button's label to "Reserved".
+  const reservedLabel = () => [...(detailsCard()?.querySelectorAll('a, button, [role="button"]') || [])]
+    .find((el) => isVisible(el) && /^reserved$/i.test(textOf(el))) || null;
   const isEnabled = (el) => !el.disabled && el.getAttribute("aria-disabled") !== "true" &&
     !/disabled/i.test(el.className || "") && getComputedStyle(el).pointerEvents !== "none";
   // Click a row; if nothing happens, try a real mouse click.
@@ -136,8 +139,15 @@
   };
   const detailsButton = (pattern) => [...(detailsCard()?.querySelectorAll('a, button, [role="button"]') || [])]
     .find((el) => isVisible(el) && pattern.test(textOf(el))) || null;
+  // Every WO name seen in the lists while searching (for "did you mean ...?" when a WO isn't found).
+  const seenNames = new Set();
+  const noteNames = () => listRows().forEach((li) => {
+    const name = rowName(li).replace(/^\s*cloud\s*wo\s*-\s*/i, "").trim();
+    if (name) seenNames.add(name);
+  });
   const findRowScrolling = async (name, find = findRow) => {
     let row = await waitFor(() => find(name), 8000);
+    noteNames();
     if (row) return row;
     const sample = [...content().querySelectorAll("li, a, div")].find((el) => isVisible(el) && inListCard(el) && scrollBoxOf(el));
     const box = scrollBoxOf(sample);
@@ -145,6 +155,7 @@
     box.scrollTop = 0;
     for (let step = 0; step < 200; step++) {
       await sleep(250);
+      noteNames();
       row = find(name);
       if (row) return row;
       if (box.scrollTop + box.clientHeight >= box.scrollHeight - 2) break;
@@ -152,6 +163,37 @@
     }
     await sleep(400);
     return find(name);
+  };
+
+  // TEMS names for the same WO number and date as `wo` but spelled differently (G23d vs G23e, a
+  // missing letter; spaces / case ignored). Closest first, at most 3.
+  const editDistance = (a, b) => {
+    let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+    for (let i = 1; i <= a.length; i++) {
+      const cur = [i];
+      for (let j = 1; j <= b.length; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      prev = cur;
+    }
+    return prev[b.length];
+  };
+  const woParts = (text) => {
+    const s = squash(text);
+    return { number: (s.match(/^(.*?_\d+)_/) || [])[1] || "", date: (s.match(/_(\d{6})_/) || [])[1] || "" };
+  };
+  const suggestionsFor = (wo) => {
+    const want = squash(wo), parts = woParts(wo);
+    return [...seenNames]
+      .map((name) => {
+        const s = squash(name), p = woParts(name);
+        const dist = editDistance(want, s);
+        // Same WO number (and date) is required, so LM_137 is never offered for LM_136.
+        const sameWo = p.number === parts.number && (!parts.date || p.date === parts.date);
+        return { name, dist, ok: s !== want && (parts.number ? sameWo : dist <= 2) };
+      })
+      .filter((x) => x.ok)
+      .sort((a, b) => a.dist - b.dist)
+      .slice(0, 3)
+      .map((x) => x.name);
   };
 
   // Only used to see when the list stops changing.
@@ -191,12 +233,13 @@
         await sleep(700);
       }
       if (!isLoggedIn()) {
-        finish({ ok: false, error: "Still not logged in to TEMS Cloud. Finish the login in its popup window, then press TEMS again." });
+        finish({ ok: false, error: "Still not logged in to TEMS Cloud. Finish the login in its popup window, then try again." });
         return;
       }
     }
 
-    // 4. Let the assignments list finish loading (stops changing), then done.
+
+    // 4. Let the Cloud list finish loading (stops changing).
     let last = -1, stableSince = Date.now();
     await waitFor(() => {
       const count = assignmentCount();
@@ -204,104 +247,227 @@
       return Date.now() - stableSince > 1500;
     }, 15000, 300);
     const loginText = state === "out" ? "Logged in to TEMS Cloud" : "TEMS Cloud was already logged in";
-    const { wo, project } = job.data || {};
-    if (!wo || !project) {
-      finish({ ok: true, summary: `${loginText} - Cloud assignments loaded.${wo ? "" : " (No WO in the box, so nothing to find.)"}` });
+    // action: "find" (where is the WO? nothing clicked), "go" (prod: Reserve in Cloud, then Open on
+    // Assign - clicks both), "test" (cloudWo / assignWo: find the buttons, click nothing).
+    const { action = "test", wo = "", project = "", cloudWo = "", assignWo = "" } = job.data || {};
+    if (!wo && !cloudWo && !assignWo) {
+      finish({ ok: true, summary: `${loginText} - Cloud assignments loaded. (No WO, so nothing to find.)` });
       return;
     }
 
-    // 5. The project: already open, or open it from the project list (going back first if
-    //    another project is open).
-    if (!inProject(project)) {
+    // ---------- steps used by the actions ----------
+    class Problem extends Error {}
+    const goCloud = async () => {
+      const button = menuButton("Cloud");
+      if (button && !isSelected(button)) {
+        debugLog("clicking Cloud");
+        await clickAndWait(button, () => isSelected(menuButton("Cloud")));
+        await sleep(800);
+      }
+    };
+    const openProject = async () => {
+      await goCloud();
+      if (inProject(project)) return;
       if (openProjectName()) {
         debugLog(`another project is open (${openProjectName()}) - going back to the list`);
         listBackButton()?.click();
         await waitFor(() => !openProjectName(), 5000);
       }
       const projectRow = await waitFor(() => findRow(project), 15000);
-      if (!projectRow) {
-        finish({ ok: false, error: `${loginText}, but project ${project} isn't in the Cloud list. Check TEMS_PROJECT in .env.` });
-        return;
-      }
+      if (!projectRow) throw new Problem(`Project ${project} isn't in TEMS Cloud's list. Check the TEMS project in Settings.`);
       debugLog(`opening project ${project}`);
       await clickAndWait(projectRow, () => inProject(project));
       if (!(await waitFor(() => inProject(project), 10000))) {
         debugLog(`project didn't open - ${describeList()}`);
-        finish({ ok: false, error: `Clicked project ${project}, but it didn't open.` });
+        throw new Problem(`Clicked project ${project}, but it didn't open.`);
+      }
+    };
+    const cloudRowFor = async (name) => {
+      await openProject();
+      const row = await findRowScrolling(name);
+      if (!row) debugLog(`${name} not in ${project} - ${describeList()}`);
+      return row;
+    };
+    const goAssign = async () => {
+      const button = await waitFor(() => menuButton("Assign"), 5000);
+      if (!button) throw new Problem("TEMS has no Assign tab.");
+      if (!isSelected(button)) {
+        debugLog("clicking Assign");
+        await clickAndWait(button, () => isSelected(menuButton("Assign")));
+        await sleep(800);
+      }
+    };
+    // Assign's refresh button (circling arrows), if there is one.
+    const refreshButton = () => [...content().querySelectorAll("a, button")].find((el) => isVisible(el) && inListCard(el) &&
+      !el.closest("li") && [...el.querySelectorAll("img")].some((img) => /refresh|reload|sync|update/i.test(img.alt || "")));
+    // Looks for `name` on Assign for up to waitMs, pressing refresh now and then (a just-reserved WO
+    // can take a moment to show up there).
+    const assignRowFor = async (name, waitMs) => {
+      await goAssign();
+      const end = Date.now() + waitMs;
+      let refreshedAt = Date.now();
+      for (;;) {
+        const row = await findRowScrolling(name, findAssignRow);
+        if (row || Date.now() > end) {
+          if (!row) debugLog(`${name} not on Assign - ${describeList()}`);
+          return row;
+        }
+        if (Date.now() - refreshedAt > 5000) {
+          refreshedAt = Date.now();
+          const refresh = refreshButton();
+          if (refresh) { debugLog("pressing Assign's refresh"); refresh.click(); }
+          else { await goCloud(); await goAssign(); } // no refresh button: switch tabs to reload the list
+        }
+        await sleep(1500);
+      }
+    };
+    const openCloudDetails = async (name, row) => {
+      debugLog(`opening ${name} in ${project}`);
+      await clickAndWait(row, () => detailsShowWo(name));
+      if (!(await waitFor(() => detailsShowWo(name), 10000))) throw new Problem(`Clicked ${name} in ${project}, but its details didn't open.`);
+    };
+    const openAssignDetails = async (name, row) => {
+      debugLog(`opening ${name} on Assign`);
+      await clickAndWait(row, () => assignDetailsShowWo(name));
+      if (!(await waitFor(() => assignDetailsShowWo(name), 10000))) throw new Problem(`Clicked ${name} on Assign, but its details didn't open.`);
+    };
+    const cloudInfo = () => {
+      const text = textOf(detailsCard());
+      return {
+        status: (text.match(/Status:\s*([^\n]+)/i) || [])[1]?.trim() || "?",
+        assignee: (text.match(/Assignee:\s*([^\n]+)/i) || [])[1]?.trim() || "?",
+      };
+    };
+    // An "Are you sure?" style popup after a click: press its OK / Yes / Reserve / Open.
+    const confirmPopup = async () => {
+      await sleep(600);
+      const dialogs = [...document.querySelectorAll('[role="dialog"], [class*="Dialog"], [class*="Modal"], [class*="Popup"]')]
+        .filter((el) => isVisible(el) && !detailsCard()?.contains(el));
+      for (const dialog of dialogs) {
+        const ok = [...dialog.querySelectorAll('a, button, [role="button"]')]
+          .find((el) => isVisible(el) && /^(ok|yes|confirm|reserve|open|start|continue)$/i.test(textOf(el)));
+        if (ok) { debugLog(`pressing "${textOf(ok)}" in a popup`); ok.click(); await sleep(800); return true; }
+      }
+      return false;
+    };
+    // Click `button`; done once `changed()` is true. Tries a real mouse click if nothing happens.
+    const press = async (button, changed, label) => {
+      debugLog(`clicking ${label}`);
+      button.click();
+      await confirmPopup();
+      if (await waitFor(changed, 6000)) return true;
+      if (button.isConnected && isVisible(button)) {
+        debugLog(`${label}: nothing changed - trying a real click`);
+        await realClick(button);
+        await confirmPopup();
+      }
+      return !!(await waitFor(changed, 12000));
+    };
+
+    // ---------- actions ----------
+    if (action === "find") {
+      // Before the ticket is made: is the WO in TEMS at all (Cloud list, or already on Assign)?
+      if (await cloudRowFor(wo)) {
+        finish({ ok: true, found: "cloud", summary: `${wo} is in TEMS Cloud (${project}) - it gets reserved after the ticket.` });
         return;
       }
-    }
-
-    // 6. The WO in the project's list (scrolls through it if it's long).
-    const woRow = await findRowScrolling(wo);
-    if (!woRow) {
-      debugLog(`WO not found - ${describeList()}`);
-      const filter = [...content().querySelectorAll("select")].find(isVisible);
-      finish({ ok: false, error: `${loginText}; project ${project} is open, but ${wo} isn't in its list` +
-        `${filter ? ` (filter: "${filter.selectedOptions[0]?.text || filter.value}")` : ""}.` });
-      return;
-    }
-    debugLog(`opening ${wo}`);
-    await clickAndWait(woRow, () => detailsShowWo(wo));
-    if (!(await waitFor(() => detailsShowWo(wo), 10000))) {
-      finish({ ok: false, error: `Clicked ${wo} in ${project}, but its details didn't open.` });
+      if (await assignRowFor(wo, 3000)) {
+        finish({ ok: true, found: "assign", summary: `${wo} is already on TEMS's Assign tab - it gets opened after the ticket.` });
+        return;
+      }
+      const suggestions = suggestionsFor(wo);
+      if (suggestions.length) debugLog(`${wo} not found - close names in TEMS: ${suggestions.join(" | ")}`);
+      finish({ ok: true, found: null, suggestions,
+        summary: `${wo} isn't in TEMS Cloud (${project}) or on Assign.` +
+          (suggestions.length ? ` TEMS has: ${suggestions.join(", ")}.` : "") });
       return;
     }
 
-    // 7. Reserve: find it and check it's enabled - NOT clicked yet (testing).
-    const reserve = await waitFor(() => reserveButton(), 5000);
-    const details = detailsCard();
-    const status = (textOf(details).match(/Status:\s*([^\n]+)/i) || [])[1]?.trim() || "?";
-    const assignee = (textOf(details).match(/Assignee:\s*([^\n]+)/i) || [])[1]?.trim() || "?";
-    if (!reserve) {
-      finish({ ok: false, error: `${wo} is open (status ${status}, assignee ${assignee}), but there's no Reserve button.` });
+    if (action === "go") {
+      // Prod: reserve it in Cloud (if it's there), then open it on Assign.
+      const done = [];
+      const cloudRow = await cloudRowFor(wo);
+      if (cloudRow) {
+        await openCloudDetails(wo, cloudRow);
+        const before = cloudInfo();
+        const reserve = await waitFor(() => reserveButton(), 5000);
+        if (reserve && isEnabled(reserve)) {
+          const reserved = await press(reserve, () => {
+            if (reservedLabel()) return true;
+            const now = reserveButton();
+            return !now || !isEnabled(now) || !/unassigned/i.test(cloudInfo().assignee);
+          }, "Reserve");
+          if (!reserved) throw new Problem(`Clicked Reserve for ${wo} (assignee ${before.assignee}), but it didn't take. Check the TEMS tab.`);
+          debugLog(`Reserve done for ${wo}${reservedLabel() ? ' (button now says "Reserved")' : ""}`);
+          done.push(`reserved in ${project}${reservedLabel() ? " (shows Reserved)" : ` (assignee now ${cloudInfo().assignee})`}`);
+        } else if (reservedLabel()) {
+          done.push(`already reserved in ${project}`);
+        } else {
+          done.push(`nothing to reserve in ${project} (status ${before.status}, assignee ${before.assignee})`);
+        }
+      }
+      const assignRow = await assignRowFor(wo, cloudRow ? 30000 : 4000);
+      if (!assignRow) {
+        if (!cloudRow) {
+          const suggestions = suggestionsFor(wo);
+          finish({ ok: false, notFound: true, suggestions, error: `${wo} isn't in TEMS Cloud (${project}) or on Assign.` +
+            (suggestions.length ? ` TEMS has: ${suggestions.join(", ")}.` : "") });
+          return;
+        }
+        throw new Problem(`${wo}: ${done.join("; ")} - but it didn't show up on Assign. Check the TEMS tab.`);
+      }
+      await openAssignDetails(wo, assignRow);
+      const openButton = await waitFor(() => detailsButton(/^(open|start)$/i), 5000);
+      if (!openButton) throw new Problem(`${wo} is on Assign, but there's no Open button.`);
+      if (!isEnabled(openButton)) throw new Problem(`${wo} is on Assign, but its ${textOf(openButton)} button is disabled.`);
+      const label = textOf(openButton);
+      const opened = await press(openButton, () => !openButton.isConnected || !isVisible(openButton) ||
+        !assignDetailsShowWo(wo) || isSelected(menuButton("Control")), label);
+      done.push(opened ? `${label} clicked on Assign` : `${label} clicked on Assign (no visible change yet)`);
+      finish({ ok: true, reserved: !!cloudRow, opened, summary: `TEMS: ${wo} - ${done.join(", then ")}.` });
       return;
     }
-    const enabled = isEnabled(reserve);
-    debugLog(`Reserve found for ${wo}: ${enabled ? "enabled - would click it" : "disabled"} (NOT clicked - test mode)`);
-    const cloudText = `${loginText} · ${project} · ${wo} (status ${status}, assignee ${assignee}): ` +
-      `Reserve found, ${enabled ? "enabled - would click it" : "DISABLED"}, not clicked.`;
 
-    // 8. Assign tab: open the WO there and check its Open button - NOT clicked yet (testing).
-    const assignWo = job.data.assignWo;
-    if (!assignWo) {
-      finish({ ok: true, reserveFound: true, reserveEnabled: enabled, summary: cloudText });
-      return;
+    // action "test": find both buttons for two (possibly different) WOs, click nothing.
+    const parts = [];
+    let allOk = true;
+    if (cloudWo) {
+      try {
+        const row = await cloudRowFor(cloudWo);
+        if (!row) { allOk = false; parts.push(`Cloud: ${cloudWo} isn't in ${project}.`); }
+        else {
+          await openCloudDetails(cloudWo, row);
+          const reserve = await waitFor(() => reserveButton(), 5000);
+          const info = cloudInfo();
+          if (!reserve && reservedLabel()) parts.push(`Cloud: ${cloudWo} already shows Reserved - nothing to click.`);
+          else if (!reserve) { allOk = false; parts.push(`Cloud: ${cloudWo} (status ${info.status}, assignee ${info.assignee}) has no Reserve button.`); }
+          else {
+            const enabled = isEnabled(reserve);
+            debugLog(`TEST Reserve for ${cloudWo}: ${enabled ? "enabled" : "disabled"} - not clicked`);
+            parts.push(`Cloud: ${cloudWo} (status ${info.status}, assignee ${info.assignee}) - Reserve found, ${enabled ? "enabled" : "DISABLED"}, not clicked.`);
+          }
+        }
+      } catch (error) { allOk = false; parts.push(`Cloud: ${error.message}`); }
     }
-    const assign = await waitFor(() => menuButton("Assign"), 5000);
-    if (!assign) {
-      finish({ ok: false, error: `${cloudText} Then: no Assign tab in TEMS.` });
-      return;
+    if (assignWo) {
+      try {
+        const row = await assignRowFor(assignWo, 4000);
+        if (!row) { allOk = false; parts.push(`Assign: ${assignWo} isn't on Assign.`); }
+        else {
+          await openAssignDetails(assignWo, row);
+          const openButton = await waitFor(() => detailsButton(/^(open|start)$/i), 5000);
+          const lastRun = textOf(detailsCard()?.querySelector('[class*="WorkOrderSelectionDetails_row"]')) || "";
+          if (!openButton) { allOk = false; parts.push(`Assign: ${assignWo} has no Open button.`); }
+          else {
+            const enabled = isEnabled(openButton);
+            debugLog(`TEST ${textOf(openButton)} for ${assignWo}: ${enabled ? "enabled" : "disabled"} - not clicked`);
+            parts.push(`Assign: ${assignWo}${lastRun ? ` (${lastRun})` : ""} - ${textOf(openButton)} found, ${enabled ? "enabled" : "DISABLED"}, not clicked.`);
+          }
+        }
+      } catch (error) { allOk = false; parts.push(`Assign: ${error.message}`); }
     }
-    if (!isSelected(assign)) {
-      debugLog("clicking Assign");
-      await clickAndWait(assign, () => isSelected(menuButton("Assign")));
-    }
-    const assignRow = await findRowScrolling(assignWo, findAssignRow);
-    if (!assignRow) {
-      debugLog(`assign WO not found - ${describeList()}`);
-      finish({ ok: false, error: `${cloudText} Then on Assign: ${assignWo} isn't in the list.` });
-      return;
-    }
-    debugLog(`opening ${assignWo} on Assign`);
-    await clickAndWait(assignRow, () => assignDetailsShowWo(assignWo));
-    if (!(await waitFor(() => assignDetailsShowWo(assignWo), 10000))) {
-      finish({ ok: false, error: `${cloudText} Then on Assign: clicked ${assignWo}, but its details didn't open.` });
-      return;
-    }
-    const openButton = await waitFor(() => detailsButton(/^(open|start)$/i), 5000);
-    const lastRun = textOf(detailsCard()?.querySelector('[class*="WorkOrderSelectionDetails_row"]')) || "";
-    if (!openButton) {
-      finish({ ok: false, error: `${cloudText} Then on Assign: ${assignWo} is open, but there's no Open / Start button.` });
-      return;
-    }
-    const openEnabled = isEnabled(openButton);
-    debugLog(`${textOf(openButton)} found for ${assignWo}: ${openEnabled ? "enabled - would click it" : "disabled"} (NOT clicked - test mode)`);
-    finish({
-      ok: true, reserveFound: true, reserveEnabled: enabled, openFound: true, openEnabled,
-      summary: `${cloudText} Assign · ${assignWo}${lastRun ? ` (${lastRun})` : ""}: ` +
-        `${textOf(openButton)} found, ${openEnabled ? "enabled - would click it" : "DISABLED"}, not clicked (test mode).`,
-    });
+    const text = `TEST (nothing clicked) · ${parts.join(" ")}`;
+    finish(allOk ? { ok: true, summary: text } : { ok: false, error: text });
   } catch (error) {
     finish({ ok: false, error: `TEMS: ${error.message}` });
   }
