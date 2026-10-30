@@ -8,7 +8,7 @@ const extensionVersion = chrome.runtime.getManifest().version;
 
 // Keep equal to "version" in manifest.json. Chrome can keep running an old saved copy of this
 // file after an update (seen across a Chrome restart); when it does, reload to get the new code.
-const backgroundBuild = "3.24";
+const backgroundBuild = "3.30";
 if (extensionVersion !== backgroundBuild) chrome.runtime.reload();
 
 // Sends to the app. If the app says our files changed on disk, reload to pick them up.
@@ -363,12 +363,8 @@ function focusAppSoon(delayMs = 4000) {
     focusAppTimer = null;
     const jobs = await getAllJobs();
     if (Object.values(jobs).some((job) => job && Date.now() - job.startedAt < jobMaxAgeMs)) return; // still busy
-    const tabs = await chrome.tabs.query({ url: ["http://127.0.0.1/*", "http://localhost/*"] });
-    const appTabs = tabs.filter((tab) => {
-      try { const port = Number(new URL(tab.url).port); return port >= 5000 && port <= 5020; } catch { return false; }
-    });
-    if (!appTabs.length) return;
-    const tab = appTabs.sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0))[0];
+    const tab = await findAppTab();
+    if (!tab) return;
     if (tab.active) {
       const win = await chrome.windows.get(tab.windowId).catch(() => null);
       if (win && win.focused) return;
@@ -378,6 +374,38 @@ function focusAppSoon(delayMs = 4000) {
   }, delayMs);
 }
 chrome.tabs.onCreated.addListener(() => cancelFocusApp());
+
+// Your Kaam25 tab (127.0.0.1 / localhost, port 5000-5020; a pinned one counts too): the given port
+// first, then the one used last.
+async function findAppTab(preferPort = 0) {
+  const tabs = await chrome.tabs.query({ url: ["http://127.0.0.1/*", "http://localhost/*"] });
+  const appTabs = tabs.filter((tab) => portOf(tab) >= 5000 && portOf(tab) <= 5020);
+  appTabs.sort((a, b) => (portOf(b) === preferPort) - (portOf(a) === preferPort) ||
+    (b.pinned - a.pinned) || (b.lastAccessed || 0) - (a.lastAccessed || 0));
+  return appTabs[0] || null;
+}
+
+// The app just started (its /app page): switch to the open Kaam25 tab, reload it so it's fresh, and
+// close the helper page. No Kaam25 tab open: the helper page becomes the app.
+async function focusAppOnStart(url, triggerTab) {
+  cancelFocusApp();
+  const port = Number(new URL(url).port);
+  const tab = await findAppTab(port);
+  if (!tab) {
+    debugLog("app started - no Kaam25 tab open, opening one", triggerTab);
+    await chrome.tabs.update(triggerTab.id, { url }).catch(() => {});
+    return;
+  }
+  debugLog(`app started - switching to the open Kaam25 tab${tab.pinned ? " (pinned)" : ""}`, triggerTab);
+  if (portOf(tab) !== port) await chrome.tabs.update(tab.id, { url, active: true }).catch(() => {});
+  else {
+    await chrome.tabs.update(tab.id, { active: true }).catch(() => {});
+    await chrome.tabs.reload(tab.id).catch(() => {});
+  }
+  await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+  await chrome.tabs.remove(triggerTab.id).catch(() => {});
+}
+function portOf(tab) { try { return Number(new URL(tab.url).port); } catch { return 0; } }
 
 async function handleMessage(message, sender) {
   switch (message.type) {
@@ -395,6 +423,9 @@ async function handleMessage(message, sender) {
     case "whatsappStart":
       cancelFocusApp();
       startWhatsappShare(message, sender.tab); // runs on; the result comes back through jobDone
+      return true;
+    case "focusApp":
+      await focusAppOnStart(message.url, sender.tab);
       return true;
     case "temsStart":
       cancelFocusApp();
@@ -480,9 +511,18 @@ async function handleMessage(message, sender) {
       // Close only the tab this job opened, and only when the job fully finished.
       if (closeTab && job.data && job.data.closeTab) {
         debugLog("job done - closing its tab", sender.tab);
-        setTimeout(() => chrome.tabs.remove(job.tabId).catch(() => {}), 1500);
+        // ...unless another job moved into it meanwhile (e.g. EQ6 reusing EQ3's ActixOne tab).
+        setTimeout(async () => {
+          const busyNow = (await getAllJobs())[job.tabId];
+          if (busyNow && Date.now() - busyNow.startedAt < jobMaxAgeMs) { debugLog("tab reused by the next job - left open"); return; }
+          chrome.tabs.remove(job.tabId).catch(() => {});
+        }, 1500);
       }
-      if (!result.error && result.ok !== false) focusAppSoon();
+      // Start Ticket's work (TEMS check / Reserve + Open, creating or finding the ticket) leaves you
+      // where it ends - only End / Close work (uploads, WhatsApp, closing a ticket) switches back.
+      const startWork = job.kind === "tems" || (job.kind === "ticket" && (job.data || {}).mode !== "close");
+      if (startWork) cancelFocusApp();
+      else if (!result.error && result.ok !== false) focusAppSoon();
       return true;
     }
   }

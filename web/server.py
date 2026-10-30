@@ -20,7 +20,7 @@ if str(projectDir) not in sys.path:
 from flask import Flask, jsonify, request, send_from_directory  # noqa: E402
 
 from kaam import config, envSettings, workflows  # noqa: E402
-from kaam.chromeBridge import ChromeBridgeError, bridgeStatus, startBridge, stopAll  # noqa: E402
+from kaam.chromeBridge import ChromeBridgeError, bridgeStatus, openInChrome, startBridge, stopAll  # noqa: E402
 from kaam.gridSummary import buildFolderName, showInExplorer  # noqa: E402
 from kaam.sheetImport import SheetImportError  # noqa: E402
 from kaam.temsParagon import actions as temsActions, runTems  # noqa: E402
@@ -239,6 +239,18 @@ def restart():
 
     threading.Timer(0.6, later).start()
     return jsonify({"restarting": True, "bootedAt": bootedAt})
+
+
+@app.post("/api/quit")
+def quitApp():
+    """Stop this copy of the app. A new copy started in a terminal calls this to take over."""
+    def later():
+        stopAll()
+        print("Another copy of Kaam25 took over - stopping this one.")
+        os._exit(0)
+
+    threading.Timer(0.4, later).start()
+    return jsonify({"quitting": True, "pid": os.getpid()})
 
 
 @app.get("/api/resolve")
@@ -545,19 +557,64 @@ def pickPort(preferred=5000):
     raise SystemExit("No free port between 5000 and 5020.")
 
 
+def showApp(url):
+    """Show the app in Chrome: the extension switches to your open Kaam25 tab (pinned or not) instead
+    of opening another; no Kaam25 tab (or no extension) -> the helper page turns into the app."""
+    import urllib.parse
+    if isPortFree(config.bridgePort):  # helper server isn't running: just open the app
+        webbrowser.open(url)
+        return
+    try:
+        openInChrome(f"http://127.0.0.1:{config.bridgePort}/app#" + urllib.parse.urlencode({"url": url}))
+    except Exception:  # Chrome not found: the default browser
+        webbrowser.open(url)
+
+
 def findRunningApp(preferred=5000):
-    """The URL of a Kaam25 web app already running on this computer, or None."""
+    """(url, pid) of a Kaam25 web app already running on this computer, or None."""
     import json
     import urllib.request
     for port in [preferred] + list(range(5001, 5021)):
         url = f"http://127.0.0.1:{port}"
         try:
             with urllib.request.urlopen(f"{url}/api/state", timeout=0.4) as response:
-                if "employeeId" in json.loads(response.read() or b"{}"):
-                    return url
+                data = json.loads(response.read() or b"{}")
         except (OSError, ValueError):
             continue
+        if "employeeId" in data:
+            booted = str(data.get("bootedAt") or "")
+            pid = booted.rsplit(".", 1)[-1]  # bootedAt ends with ".<pid>"
+            return url, int(pid) if pid.isdigit() else None
     return None
+
+
+def takeOver(url, pid, port):
+    """Stop the copy running at `url` so this one can run in your terminal instead."""
+    import time
+    import urllib.request
+    try:
+        urllib.request.urlopen(urllib.request.Request(f"{url}/api/quit", data=b"{}", method="POST",
+                                                      headers={"Content-Type": "application/json"}),
+                               timeout=2).close()
+    except OSError:
+        pass  # an older copy without /api/quit: the process kill below handles it
+    deadline = time.time() + 6
+    while time.time() < deadline:
+        if isPortFree(port) and isPortFree(config.bridgePort):
+            return True
+        time.sleep(0.2)
+    if pid and pid != os.getpid():  # didn't let go in time: end its process
+        try:
+            import signal
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            if isPortFree(port) and isPortFree(config.bridgePort):
+                return True
+            time.sleep(0.2)
+    return False
 
 
 def main():
@@ -570,11 +627,14 @@ def main():
             time.sleep(0.2)
     else:
         running = findRunningApp(preferred)
-        if running:  # double-clicked again: show the open app instead of starting a second copy
-            print(f"Kaam25 is already running on {running} - opening it.")
-            if "--no-browser" not in sys.argv:
-                webbrowser.open(running)
-            return
+        if running:  # an older copy is running: stop it so this one runs in this window
+            url, pid = running
+            print(f"Kaam25 is already running on {url} - stopping it so it runs here instead ...")
+            oldPort = int(url.rsplit(":", 1)[-1])
+            if takeOver(url, pid, oldPort):
+                preferred = oldPort  # same address, so your open tab keeps working
+            else:
+                print("! Couldn't stop the old copy - starting on the next free port.")
     port = pickPort(preferred)
     try:
         startBridge()  # the Chrome extension talks to this; also shows "connected" in the UI
@@ -583,7 +643,7 @@ def main():
     url = f"http://127.0.0.1:{port}"
     print(f"Kaam25 web is running on {url}  (Ctrl+C to stop)")
     if "--no-browser" not in sys.argv and not afterRestart:
-        threading.Timer(1.0, lambda: webbrowser.open(url)).start()
+        threading.Timer(1.0, lambda: showApp(url)).start()
     app.run(host="127.0.0.1", port=port, threaded=True, use_reloader=False, debug=False)
 
 

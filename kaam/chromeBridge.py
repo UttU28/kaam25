@@ -142,6 +142,20 @@ class BridgeHandler(BaseHTTPRequestHandler):
         # job to your open WhatsApp Web / TEMS Paragon tab (or turns this tab into one).
         triggerPages = {"/whatsapp": ("WhatsApp", "Sending to WhatsApp…"), "/tems": ("TEMS", "Opening TEMS…")}
         page = triggerPages.get(self.path.split("?")[0].split("#")[0])
+        if self.path.split("?")[0].split("#")[0] == "/app":
+            # /app#url=... -> the extension switches to your open Kaam25 tab (pinned or not) and closes
+            # this one. No extension (or no Kaam25 tab): this page becomes the app after 3 s.
+            body = ("<!doctype html><meta charset='utf-8'><title>Kaam25: 13 Bhai gaadi chalayega</title>"
+                    "<body style='background:#0f1115;color:#8a91a0;font:14px Segoe UI;padding:40px'>Opening Kaam25…"
+                    "<script>const u=new URLSearchParams(location.hash.slice(1)).get('url');"
+                    "if(u&&/^http:\\/\\/127\\.0\\.0\\.1:\\d+\\/?$/.test(u))setTimeout(()=>location.replace(u),3000);</script>"
+                    "</body>").encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if page:
             body = (f"<!doctype html><meta charset='utf-8'><title>Kaam25: 13 Bhai gaadi chalayega - {page[0]}</title>"
                     "<body style='background:#0f1115;color:#8a91a0;font:14px Segoe UI;padding:40px'>"

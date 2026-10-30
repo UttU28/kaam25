@@ -126,6 +126,9 @@ async function boot() {
   $("#jobsPill").addEventListener("click", () => { location.hash = "#/today"; });
   document.addEventListener("keydown", (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") { e.preventDefault(); openPalette(); }
+    // "/" opens the search too - unless you're typing in a box.
+    const typing = e.target.closest?.("input, textarea, select, [contenteditable='true']");
+    if (e.key === "/" && !typing && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); openPalette(); }
   });
   try {
     store.settings = await api("/api/settings");

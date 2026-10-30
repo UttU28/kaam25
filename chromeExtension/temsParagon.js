@@ -145,14 +145,52 @@
     const name = rowName(li).replace(/^\s*cloud\s*wo\s*-\s*/i, "").trim();
     if (name) seenNames.add(name);
   });
+  // Wait until the list has loaded and stopped changing (or `done()`), at most maxMs.
+  const listSettled = async (done = () => false, maxMs = 8000) => {
+    let last = -1, since = Date.now();
+    await waitFor(() => {
+      if (done()) return true;
+      const count = listRows().length;
+      if (count !== last) { last = count; since = Date.now(); }
+      return count > 0 && Date.now() - since > 1000;
+    }, maxMs, 250);
+  };
+  // The list's scroll box, and whether scrolling loads more rows (most TEMS lists hold every row
+  // already - then there's nothing to scroll for).
+  const listScrollBox = () => scrollBoxOf([...content().querySelectorAll("li, a, div")].find((el) => isVisible(el) && inListCard(el) && scrollBoxOf(el)));
+  const scrollLoadsMore = async (box) => {
+    const before = listRows().length;
+    box.scrollTop = box.scrollHeight;
+    await sleep(700);
+    const more = listRows().length !== before;
+    box.scrollTop = 0;
+    return more;
+  };
+  // Every name in the current list (Cloud project or Assign), scrolling only if the list loads lazily.
+  const collectNames = async () => {
+    seenNames.clear();
+    await listSettled();
+    noteNames();
+    const box = listScrollBox();
+    if (box && await scrollLoadsMore(box)) {
+      for (let step = 0; step < 200; step++) {
+        noteNames();
+        if (box.scrollTop + box.clientHeight >= box.scrollHeight - 2) break;
+        box.scrollTop += Math.max(100, box.clientHeight * 0.8);
+        await sleep(250);
+      }
+      noteNames();
+      box.scrollTop = 0;
+    }
+    return new Set(seenNames);
+  };
   const findRowScrolling = async (name, find = findRow) => {
-    let row = await waitFor(() => find(name), 8000);
+    await listSettled(() => !!find(name));
+    let row = find(name);
     noteNames();
     if (row) return row;
-    const sample = [...content().querySelectorAll("li, a, div")].find((el) => isVisible(el) && inListCard(el) && scrollBoxOf(el));
-    const box = scrollBoxOf(sample);
-    if (!box) return null;
-    box.scrollTop = 0;
+    const box = listScrollBox();
+    if (!box || !(await scrollLoadsMore(box))) return null;
     for (let step = 0; step < 200; step++) {
       await sleep(250);
       noteNames();
@@ -275,7 +313,8 @@
     const openProject = async () => {
       await goCloud();
       if (inProject(project)) return;
-      if (openProjectName()) {
+      // "No Cloud project selected" is the project list itself, not an open project.
+      if (openProjectName() && !/no cloud project/i.test(openProjectName())) {
         debugLog(`another project is open (${openProjectName()}) - going back to the list`);
         listBackButton()?.click();
         await waitFor(() => !openProjectName(), 5000);
@@ -372,45 +411,67 @@
     };
 
     // ---------- actions ----------
-    if (action === "find") {
-      // Before the ticket is made: is the WO in TEMS at all (Cloud list, or already on Assign)?
-      // One pass per list looks for both spellings: the WO exactly as given wins; its d/e twin
-      // (G23d <-> G23e, everything else identical) is used only when the exact one isn't there.
+    // Where is the WO in TEMS? Reads every name in the Cloud project list and on Assign, then picks
+    // the best fit: the WO exactly as given (Cloud, then Assign), else its d/e twin (G23d <-> G23e,
+    // everything else identical; Cloud, then Assign). An exact Cloud match can't be beaten, so
+    // Assign isn't read then. Returns {name, where, twin} or null (+ suggestions for the popup).
+    const locate = async (wo) => {
       const twin = twinOf(wo);
-      const seenIn = (names) => [...names].find((name) => twin && squash(name) === squash(twin));
-      seenNames.clear();
-      if (await cloudRowFor(wo)) {
-        finish({ ok: true, found: "cloud", matchedWo: wo, summary: `${wo} is in TEMS Cloud (${project}) - it gets reserved after the ticket.` });
-        return;
-      }
-      const cloudTwin = seenIn(seenNames);
-      seenNames.clear();
-      if (await assignRowFor(wo, 3000)) {
-        finish({ ok: true, found: "assign", matchedWo: wo, summary: `${wo} is already on TEMS's Assign tab - it gets opened after the ticket.` });
-        return;
-      }
-      const assignTwin = seenIn(seenNames);
-      if (cloudTwin || assignTwin) {
-        const name = cloudTwin || assignTwin, where = cloudTwin ? "cloud" : "assign";
-        debugLog(`${wo} not in TEMS, but ${name} is (${where}) - using that`);
-        finish({ ok: true, found: where, matchedWo: name,
-          summary: `TEMS has ${name} (not ${wo}) ${where === "cloud" ? `in Cloud (${project})` : "on Assign"} - using that.` });
+      const pick = (names, want) => want ? [...names].find((name) => squash(name) === squash(want)) : undefined;
+      await openProject();
+      const cloudNames = await collectNames();
+      const exactCloud = pick(cloudNames, wo);
+      if (exactCloud) return { name: exactCloud, where: "cloud", twin: false };
+      await goAssign();
+      const assignNames = await collectNames();
+      const all = new Set([...cloudNames, ...assignNames]);
+      const choices = [
+        [pick(assignNames, wo), "assign", false],
+        [pick(cloudNames, twin), "cloud", true],
+        [pick(assignNames, twin), "assign", true],
+      ];
+      debugLog(`${wo}: ${cloudNames.size} names in ${project}, ${assignNames.size} on Assign` +
+        (twin ? ` - exact or ${twin}` : ""));
+      const [name, where, isTwin] = choices.find(([n]) => n) || [];
+      seenNames.clear(); all.forEach((n) => seenNames.add(n)); // for suggestionsFor
+      return name ? { name, where, twin: isTwin } : null;
+    };
+    const notFoundText = (wo, suggestions) => `${wo} isn't in TEMS Cloud (${project}) or on Assign.` +
+      (suggestions.length ? ` TEMS has: ${suggestions.join(", ")}.` : "");
+
+    if (action === "find") {
+      // Before the ticket is made: is the WO in TEMS (and under which spelling)? Nothing is clicked.
+      const spot = await locate(wo);
+      if (spot) {
+        const where = spot.where === "cloud" ? `in TEMS Cloud (${project})` : "on TEMS's Assign tab";
+        if (spot.twin) debugLog(`${wo} not in TEMS, but ${spot.name} is (${spot.where}) - using that`);
+        finish({ ok: true, found: spot.where, matchedWo: spot.name,
+          summary: spot.twin ? `TEMS has ${spot.name} (not ${wo}) ${where} - using that.`
+            : `${wo} is ${where} - it gets ${spot.where === "cloud" ? "reserved" : "opened"} after the ticket.` });
         return;
       }
       const suggestions = suggestionsFor(wo);
       if (suggestions.length) debugLog(`${wo} not found - close names in TEMS: ${suggestions.join(" | ")}`);
-      finish({ ok: true, found: null, suggestions,
-        summary: `${wo} isn't in TEMS Cloud (${project}) or on Assign.` +
-          (suggestions.length ? ` TEMS has: ${suggestions.join(", ")}.` : "") });
+      finish({ ok: true, found: null, suggestions, summary: notFoundText(wo, suggestions) });
       return;
     }
 
     if (action === "go") {
-      // Prod: reserve it in Cloud (if it's there), then open it on Assign.
-      const done = [];
-      const cloudRow = await cloudRowFor(wo);
-      if (cloudRow) {
-        await openCloudDetails(wo, cloudRow);
+      // Prod: find it (best fit, as above), reserve it in Cloud if it's there, then open it on Assign.
+      const spot = await locate(wo);
+      if (!spot) {
+        const suggestions = suggestionsFor(wo);
+        finish({ ok: false, notFound: true, suggestions, error: notFoundText(wo, suggestions) });
+        return;
+      }
+      const name = spot.name;
+      if (spot.twin) debugLog(`${wo} not in TEMS, but ${name} is (${spot.where}) - using that`);
+      const done = spot.twin ? [`TEMS has it as ${name} (not ${wo})`] : [];
+      let cloudRow = null;
+      if (spot.where === "cloud") {
+        cloudRow = await cloudRowFor(name);
+        if (!cloudRow) throw new Problem(`${name} was in ${project} a moment ago, but isn't now. Check the TEMS tab.`);
+        await openCloudDetails(name, cloudRow);
         const before = cloudInfo();
         const reserve = await waitFor(() => reserveButton(), 5000);
         if (reserve && isEnabled(reserve)) {
@@ -419,8 +480,8 @@
             const now = reserveButton();
             return !now || !isEnabled(now) || !/unassigned/i.test(cloudInfo().assignee);
           }, "Reserve");
-          if (!reserved) throw new Problem(`Clicked Reserve for ${wo} (assignee ${before.assignee}), but it didn't take. Check the TEMS tab.`);
-          debugLog(`Reserve done for ${wo}${reservedLabel() ? ' (button now says "Reserved")' : ""}`);
+          if (!reserved) throw new Problem(`Clicked Reserve for ${name} (assignee ${before.assignee}), but it didn't take. Check the TEMS tab.`);
+          debugLog(`Reserve done for ${name}${reservedLabel() ? ' (button now says "Reserved")' : ""}`);
           done.push(`reserved in ${project}${reservedLabel() ? " (shows Reserved)" : ` (assignee now ${cloudInfo().assignee})`}`);
         } else if (reservedLabel()) {
           done.push(`already reserved in ${project}`);
@@ -428,25 +489,18 @@
           done.push(`nothing to reserve in ${project} (status ${before.status}, assignee ${before.assignee})`);
         }
       }
-      const assignRow = await assignRowFor(wo, cloudRow ? 30000 : 4000);
-      if (!assignRow) {
-        if (!cloudRow) {
-          const suggestions = suggestionsFor(wo);
-          finish({ ok: false, notFound: true, suggestions, error: `${wo} isn't in TEMS Cloud (${project}) or on Assign.` +
-            (suggestions.length ? ` TEMS has: ${suggestions.join(", ")}.` : "") });
-          return;
-        }
-        throw new Problem(`${wo}: ${done.join("; ")} - but it didn't show up on Assign. Check the TEMS tab.`);
-      }
-      await openAssignDetails(wo, assignRow);
+      const assignRow = await assignRowFor(name, cloudRow ? 30000 : 4000);
+      if (!assignRow) throw new Problem(`${name}: ${done.join("; ")} - but it didn't show up on Assign. Check the TEMS tab.`);
+      await openAssignDetails(name, assignRow);
       const openButton = await waitFor(() => detailsButton(/^(open|start)$/i), 5000);
-      if (!openButton) throw new Problem(`${wo} is on Assign, but there's no Open button.`);
-      if (!isEnabled(openButton)) throw new Problem(`${wo} is on Assign, but its ${textOf(openButton)} button is disabled.`);
+      if (!openButton) throw new Problem(`${name} is on Assign, but there's no Open button.`);
+      if (!isEnabled(openButton)) throw new Problem(`${name} is on Assign, but its ${textOf(openButton)} button is disabled.`);
       const label = textOf(openButton);
       const opened = await press(openButton, () => !openButton.isConnected || !isVisible(openButton) ||
-        !assignDetailsShowWo(wo) || isSelected(menuButton("Control")), label);
+        !assignDetailsShowWo(name) || isSelected(menuButton("Control")), label);
       done.push(opened ? `${label} clicked on Assign` : `${label} clicked on Assign (no visible change yet)`);
-      finish({ ok: true, reserved: !!cloudRow, opened, summary: `TEMS: ${wo} - ${done.join(", then ")}.` });
+      finish({ ok: true, found: spot.where, matchedWo: name, reserved: !!cloudRow, opened,
+        summary: `TEMS: ${name} - ${done.join(", then ")}.` });
       return;
     }
 

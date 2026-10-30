@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Kaam25 Helper",
-  "version": "3.24",
+  "version": "3.30",
   "description": "Finds ticket IDs on TechInsights, uploads on ActixOne, logs in to TEMS Cloud and shares results on WhatsApp Web for Kaam25: 13 Bhai gaadi chalayega.",
   "background": {
     "service_worker": "background.js"
@@ -65,6 +65,15 @@
       ],
       "js": [
         "temsLogin.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "http://127.0.0.1:47821/app*"
+      ],
+      "js": [
+        "appTrigger.js"
       ],
       "run_at": "document_idle"
     }

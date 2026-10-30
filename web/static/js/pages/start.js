@@ -8,7 +8,7 @@ export default {
   render(root, params) {
     const settings = store.settings || {};
     let mode = store.state?.cloudStart ? "local" : "cloud";
-    let busy = false, lastWo = "";
+    let busy = false, lastWo = "", temsDone = null;
 
     root.innerHTML = `
       <div class="grid colsMainSide">
@@ -75,6 +75,11 @@ export default {
       onResolve: (wo, record, matchedBy) => {
         loc.show(wo, record);
         if (busy) return;
+        // A different WO: clear the last run's job log and Ticket ID so nothing old is left showing.
+        if (wo.replace(/\s+/g, "").toLowerCase() !== String(lastWo || "").replace(/\s+/g, "").toLowerCase()) {
+          $(".result", root).classList.add("hidden");
+          job.hide();
+        }
         if (record?.importedAt && wo) {
           msg(`Found in your imported list${record.cluster ? ` (${record.cluster})` : ""}, ${record.startedAt ? "already started" : "not started yet"}. Grid key and location loaded.`, "info");
         } else if (record && matchedBy && matchedBy !== "wo") {
@@ -188,15 +193,19 @@ export default {
     }
     // Prod, before the ticket: is the WO in TEMS (Cloud list or Assign)? If not, offer to fix
     // its name. Returns the WO to start (maybe corrected), or null to stop.
-    async function temsCheck(wo) {
+    // action "find": only check (Cloud, before the ticket). "go": check + Reserve + Open in one
+    // TEMS visit (Local - nothing to make in between). Returns the WO to use (TEMS's spelling), or null.
+    async function temsCheck(wo, action = "find") {
       for (let tries = 0; tries < 5; tries++) {
-        msg(`Checking TEMS for ${wo} first… (TEMS tab in Chrome, logs in if needed)`, "info");
+        msg(action === "go" ? `TEMS: finding ${wo}, reserving it and opening it on Assign… (TEMS tab in Chrome)`
+          : `Checking TEMS for ${wo} first… (TEMS tab in Chrome, logs in if needed)`, "info");
         let done;
-        try { done = await runTemsJob({ action: "find", wo }); }
+        try { done = await runTemsJob({ action, wo }); }
         catch (error) { done = { state: "error", error: error.message }; }
         if (done.state === "stopped") { msg("Stopped by you.", "bad"); return null; }
         const r = done.result || {};
         if (done.state === "done" && r.ok && r.found) {
+          if (action === "go") temsDone = { wo: r.matchedWo || wo, summary: r.summary };
           // TEMS found it under its d/e twin (the exact name wasn't there): use TEMS's name
           // everywhere (Records too) - already confirmed, so no second check.
           const tems = r.matchedWo || wo;
@@ -211,7 +220,7 @@ export default {
           msg(r.summary, "ok");
           return tems;
         }
-        if (done.state !== "done" || !r.ok) {
+        if (done.state !== "done" || (!r.ok && !r.notFound)) {
           // TEMS couldn't be checked (not running, project missing...): start anyway?
           const choice = await modal({
             title: "Couldn't check TEMS",
@@ -255,6 +264,12 @@ export default {
     }
     // After the ticket: prod = Reserve + Open for real; test mode = ask for two WOs, click nothing.
     async function temsFinish(wo, ticketText) {
+      // Local: TEMS was already done in the same visit as the check.
+      if (temsDone && wo && temsDone.wo.replace(/\s+/g, "").toLowerCase() === wo.replace(/\s+/g, "").toLowerCase()) {
+        msg(`${ticketText} ${temsDone.summary}`, "ok"); toast(`TEMS: ${wo} reserved and opened.`, "ok");
+        temsDone = null;
+        return;
+      }
       if (!wo || skipTemsFor === wo) { if (skipTemsFor === wo) msg(`${ticketText} TEMS skipped.`, "warn"); return; }
       setBusy(true);
       try {
@@ -292,11 +307,13 @@ export default {
       let wo = box.get();
       if (!wo) { msg("Enter a WO first.", "bad"); box.focus(); return; }
       if (busy) return;
-      skipTemsFor = null;
-      // Always first: find the WO in TEMS (clicks nothing) and take TEMS's spelling (d / e) before
-      // anything is made - then Cloud (TechInsights) or Local, then Reserve + Open in TEMS.
+      skipTemsFor = null; temsDone = null;
+      // Always first: find the WO in TEMS and take TEMS's spelling (d / e) before anything is made.
+      // Cloud: check only, then the ticket, then Reserve + Open. Local (prod): one TEMS visit does the
+      // check, Reserve and Open, then the local start is saved.
+      const action = mode === "local" && !temsTestMode() ? "go" : "find";
       setBusy(true);
-      try { wo = await temsCheck(wo); } finally { setBusy(false); }
+      try { wo = await temsCheck(wo, action); } finally { setBusy(false); }
       if (!wo) return;
       await start();
     }

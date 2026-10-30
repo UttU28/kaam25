@@ -46,6 +46,8 @@ export function woBox(opts = {}) {
 
   input.addEventListener("input", resolve);
   input.addEventListener("keydown", async (event) => {
+    // The type-to-search list: arrows move, Enter picks the highlighted WO, Esc closes it.
+    if (pickerKeys(event)) return;
     if (event.key !== "Enter") return;
     event.preventDefault();
     await resolveNow();  // a pasted grid key / Ticket ID becomes its WO first
@@ -58,34 +60,76 @@ export function woBox(opts = {}) {
   });
 
   let refreshPicker = () => {};
+  let pickerKeys = () => false;
   if (opts.picker) {
     const holder = $(".pickerBtn", el);
-    let items = [];
-    const fill = async (pop) => {
-      try { items = await opts.picker.load(); } catch (error) { toast(error.message, "bad"); return; }
-      if (!pop.isConnected) return;
-      pop.innerHTML = `<div class="popHead">${esc(opts.picker.label)} · ${items.length}</div>` + (items.length
-        ? items.map((item, n) => `<div class="popItem" data-n="${n}">
+    let items = [], shown = [], sel = -1, query = "";
+    const squash = (text) => String(text || "").replace(/\s+/g, "").toLowerCase();
+    const paint = (pop) => {
+      const q = squash(query);
+      shown = q ? items.filter((item) => [item.wo, item.title, item.sub].some((t) => squash(t).includes(q))) : items;
+      if (sel >= shown.length) sel = shown.length - 1;
+      pop.innerHTML = `<div class="popHead">${esc(opts.picker.label)}${q ? ` · matching "${esc(query.trim())}"` : ""} · ${shown.length}</div>` + (shown.length
+        ? shown.map((item, n) => `<div class="popItem ${n === sel ? "sel" : ""}" data-n="${n}">
               <div style="min-width:0;flex:1"><div class="mainT">${esc(item.title)}</div><div class="subT">${esc(item.sub || "")}</div></div>
               ${item.badge || ""}</div>`).join("")
-        : `<div class="popEmpty">${esc(opts.picker.empty || "Nothing here.")}</div>`);
+        : `<div class="popEmpty">${esc(q ? "No matches in this list." : opts.picker.empty || "Nothing here.")}</div>`);
+      pop.querySelector(".popItem.sel")?.scrollIntoView({ block: "nearest" });
+    };
+    const fill = async (pop) => {
+      try { items = await opts.picker.load(); } catch (error) { toast(error.message, "bad"); return; }
+      if (pop.isConnected) paint(pop);
+    };
+    const choose = (pop, n) => {
+      const item = shown[n];
+      if (!item) return;
+      pop.remove();
+      setValue(item.wo);
+      opts.picker.onPick?.(item);
+    };
+    // Opens the list (filtered by `text` when given); reuses an open one.
+    const openPop = async (text = "") => {
+      query = text;
+      let pop = $(".popover", holder);
+      if (pop) { paint(pop); return pop; }
+      $$(".popover").forEach((p) => p.remove());
+      pop = h(`<div class="popover"><div class="popHead">${esc(opts.picker.label)}</div><div class="popEmpty">Loading…</div></div>`);
+      holder.append(pop);
+      pop.addEventListener("click", (e) => {
+        const row = e.target.closest(".popItem");
+        if (row) choose(pop, +row.dataset.n);
+      });
+      sel = -1;
+      await fill(pop);
+      return pop;
     };
     $(".pick", el).addEventListener("click", async (event) => {
       event.stopPropagation();
       const open = $(".popover", holder);
       if (open) { open.remove(); return; }
-      $$(".popover").forEach((p) => p.remove());
-      const pop = h(`<div class="popover"><div class="popHead">${esc(opts.picker.label)}</div><div class="popEmpty">Loading…</div></div>`);
-      holder.append(pop);
-      pop.addEventListener("click", (e) => {
-        const row = e.target.closest(".popItem");
-        if (!row) return;
-        setValue(items[+row.dataset.n].wo);
-        pop.remove();
-        opts.picker.onPick?.(items[+row.dataset.n]);
-      });
-      await fill(pop);
+      await openPop("");
     });
+    // Typing searches the list: 2+ characters (e.g. "139") show the matching WOs.
+    input.addEventListener("input", () => {
+      const text = input.value.trim();
+      if (text.length < 2) { $(".popover", holder)?.remove(); return; }
+      sel = -1;
+      openPop(text);
+    });
+    pickerKeys = (event) => {
+      const pop = $(".popover", holder);
+      if (!pop) return false;
+      if (event.key === "Escape") { pop.remove(); event.preventDefault(); return true; }
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        sel = event.key === "ArrowDown" ? Math.min(sel + 1, shown.length - 1) : Math.max(sel - 1, 0);
+        paint(pop);
+        return true;
+      }
+      if (event.key === "Enter" && sel >= 0 && shown[sel]) { event.preventDefault(); choose(pop, sel); return true; }
+      if (event.key === "Enter") pop.remove();
+      return false;
+    };
     // Live: an open list reloads itself when the data changes.
     refreshPicker = () => { const pop = $(".popover", holder); if (pop) fill(pop); };
   }

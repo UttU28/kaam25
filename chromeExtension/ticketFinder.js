@@ -381,7 +381,12 @@
       debugLog("ticket not in the visible list, searching for the WO");
       row = await waitFor(findTicketRow, 12000, 500);
     }
-    if (!row) throw new Error(`Couldn't find the ticket${ticketIdWanted ? ` ${ticketIdWanted}` : ""} for this WO in the tickets list.`);
+    if (!row) {
+      const error = new Error(`Couldn't find the ticket${ticketIdWanted ? ` ${ticketIdWanted}` : ""} for this WO in the tickets list.`);
+      error.rowMissing = true; // often just a slow page: reload and look again
+      throw error;
+    }
+    if (job.data.rowReloads) await chrome.runtime.sendMessage({ type: "jobUpdate", data: { rowReloads: 0 } });
     return row;
   };
   const rowTaskLinks = (row) => Array.from(row.querySelectorAll(".tasks-column a, .tasks-column button"))
@@ -561,7 +566,17 @@
         async (error) => {
           const latest = await chrome.runtime.sendMessage({ type: "jobState" });
           const data = (latest && latest.data) || job.data;
-          finish({ error: error.message, stepsDone: data.stepsDone || [], alreadyDone: data.alreadyDone || [] });
+          // Ticket not in the list: TechInsights is sometimes slow and shows no / few tickets - a full
+          // reload usually shows them. Up to 2 reloads, then give up (steps already done stay done).
+          const reloads = data.rowReloads || 0;
+          if (error.rowMissing && reloads < 2) {
+            debugLog(`ticket not in the list - reloading the page and looking again (${reloads + 1}/2)`);
+            await chrome.runtime.sendMessage({ type: "jobUpdate", data: { rowReloads: reloads + 1 } });
+            setTimeout(() => location.reload(), 1000);
+            return;
+          }
+          finish({ error: error.message + (error.rowMissing ? " (reloaded the page twice)" : ""),
+                   stepsDone: data.stepsDone || [], alreadyDone: data.alreadyDone || [] });
         });
       return;
     }

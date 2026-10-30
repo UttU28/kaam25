@@ -86,12 +86,52 @@
 
     const input = emailField.querySelector('input[type="text"]');
     if (!input) throw new Error("Couldn't find where to type in the Email field.");
-    await realClick(input);
-    await sleep(400);
-    const typed = await chrome.runtime.sendMessage({ type: "realType", text: email, pressEnter: true });
-    if (!typed) throw new Error("Couldn't type the email into the Email field.");
-    if (!(await waitFor(hasEmail, 5000))) {
-      throw new Error(`Typed ${email} and pressed Enter, but it didn't appear in the Email field.`);
+    // Works at any window size: in a narrow (half-screen) window the typing spot after the existing
+    // chip can be tiny or wrap to its own line, so a click on its middle can miss. Click a safe spot,
+    // make sure the cursor really is in the box, type, and try again if the email didn't show up.
+    const clickIntoBox = async () => {
+      emailField.scrollIntoView({ block: "center" });
+      await sleep(150);
+      const rect = input.getBoundingClientRect();
+      const slot = (emailField.querySelector(".v-select__selections") || emailField).getBoundingClientRect();
+      // The typing spot itself when it's wide enough; else the empty end of the chips area.
+      const x = rect.width >= 30 ? rect.left + Math.min(rect.width / 2, 40) : slot.right - 12;
+      const y = rect.height > 0 ? rect.top + rect.height / 2 : slot.bottom - 12;
+      // Never click on an email chip (its ✕ would remove that email): then just put the cursor in.
+      const hit = document.elementFromPoint(x, y);
+      const safe = hit && emailField.contains(hit) && !hit.closest(".v-chip");
+      const ok = safe && await chrome.runtime.sendMessage({ type: "realClick", x, y });
+      if (!ok) input.click();
+      await sleep(300);
+      if (document.activeElement !== input) input.focus();
+      await sleep(150);
+      return document.activeElement === input;
+    };
+    const setValue = (value) => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(input, value);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    };
+    for (let attempt = 1; attempt <= 3 && !hasEmail(); attempt++) {
+      const focused = await clickIntoBox();
+      if (input.value) setValue("");
+      if (attempt < 3) {
+        if (!focused) debugLog(`email box didn't take the cursor (try ${attempt}) - typing anyway`);
+        const typed = await chrome.runtime.sendMessage({ type: "realType", text: email, pressEnter: true });
+        if (!typed) debugLog(`real typing failed (try ${attempt})`);
+      } else {
+        // Last try: put the text in directly and press Enter on the box itself.
+        debugLog("email: typing didn't work twice - filling the box directly");
+        input.focus();
+        setValue(email);
+        for (const type of ["keydown", "keypress", "keyup"]) {
+          input.dispatchEvent(new KeyboardEvent(type, { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true }));
+        }
+      }
+      if (await waitFor(hasEmail, 3000)) break;
+      debugLog(`email not in the list after try ${attempt} (box ${Math.round(input.getBoundingClientRect().width)}px wide, window ${innerWidth}px)`);
+    }
+    if (!hasEmail()) {
+      throw new Error(`Typed ${email} and pressed Enter (3 tries), but it didn't appear in the Email field.`);
     }
     debugLog("email added");
     document.body.click(); // close the email dropdown
