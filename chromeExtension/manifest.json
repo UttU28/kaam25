@@ -1,0 +1,41 @@
+{
+  "manifest_version": 3,
+  "name": "Kaam25 Helper",
+  "version": "3.17",
+  "description": "Finds ticket IDs on TechInsights, uploads on ActixOne, logs in to TEMS Cloud and shares results on WhatsApp Web for the Kaam25 app.",
+  "background": { "service_worker": "background.js" },
+  "permissions": ["storage", "debugger", "scripting", "alarms"],
+  "content_scripts": [
+    {
+      "matches": ["https://*.amdocs-ti.com/*", "https://amdocs-ti.com/*"],
+      "js": ["ticketFinder.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["https://a1-cra.actixone.com/*"],
+      "js": ["actixLogin.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["https://login.microsoftonline.com/*"],
+      "js": ["microsoftLogin.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["http://127.0.0.1:47821/whatsapp*"],
+      "js": ["whatsappTrigger.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["http://127.0.0.1:47821/tems*"],
+      "js": ["temsTrigger.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://*.infovista.com/auth/*"],
+      "js": ["temsLogin.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "host_permissions": ["http://127.0.0.1:47821/*", "https://web.whatsapp.com/*", "http://localhost:8080/*"]
+}

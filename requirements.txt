@@ -1,0 +1,4 @@
+﻿flask>=3.0
+python-dotenv>=1.0
+openpyxl>=3.1
+customtkinter>=5.2.2  # only for the old desktop app (desktop/app.py)

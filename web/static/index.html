@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kaam25</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%235b8cff' d='M13 2 4 14h7l-1 8 9-12h-7z'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar" id="sidebar">
+      <a class="brand" href="#/today">
+        <span class="brandMark"><svg viewBox="0 0 24 24"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg></span>
+        <span class="brandText">Kaam25<small>Drive test desk</small></span>
+      </a>
+      <nav class="nav" id="nav"></nav>
+      <div class="sidebarFoot" id="sidebarFoot"></div>
+    </aside>
+
+    <div class="main">
+      <header class="topbar">
+        <button class="iconBtn menuBtn" id="menuBtn" title="Menu" aria-label="Menu"></button>
+        <div class="pageHeading">
+          <h1 id="pageTitle">Today</h1>
+          <p id="pageSub"></p>
+        </div>
+        <div class="topbarRight">
+          <button class="searchTrigger" id="searchTrigger" title="Find a WO, grid key or Ticket ID (Ctrl+K)">
+            <span class="i" data-icon="search"></span><span class="searchLabel">Find WO, grid key, ticket…</span><kbd>Ctrl K</kbd>
+          </button>
+          <div class="jobsPill hidden" id="jobsPill"></div>
+        </div>
+      </header>
+      <main class="content" id="content"></main>
+    </div>
+  </div>
+
+  <div class="toasts" id="toasts"></div>
+  <div class="modalRoot" id="modalRoot"></div>
+  <div class="paletteRoot" id="paletteRoot"></div>
+
+  <script type="module" src="/static/js/main.js"></script>
+</body>
+</html>

@@ -1,0 +1,358 @@
+// Injected into your WhatsApp Web tab for one share: opens the chat, attaches the renamed
+// CSV, types the report as its caption and (only if the app says so) presses Send.
+// WhatsApp can be slow, so every step waits for the page to finish loading and settle.
+(async () => {
+  const job = await chrome.runtime.sendMessage({ type: "jobState" });
+  if (!job || job.kind !== "whatsapp") return;
+  if (window.kaamShareRunning === job.requestId) return; // already running for this share
+  // A newer share (e.g. a retry) takes over; an older one still running here stops quietly.
+  window.kaamShareRunning = job.requestId;
+  const { group, caption, send } = job.data;
+  const attempt = job.data.attempt || 1;
+  const replacedError = "replaced by a newer share";
+  const stopIfReplaced = () => {
+    if (window.kaamShareRunning !== job.requestId) throw new Error(replacedError);
+  };
+
+  const debugLog = (text) => chrome.runtime.sendMessage({ type: "log", text: `whatsapp: ${text}` }).catch(() => {});
+  const finish = (result) => {
+    debugLog(`finished: ${JSON.stringify(result)}`);
+    window.kaamShareRunning = null;
+    chrome.runtime.sendMessage({ type: "jobDone", result });
+  };
+
+  // ---------- helpers ----------
+  const sleep = async (ms) => {
+    await new Promise((resolve) => setTimeout(resolve, ms));
+    stopIfReplaced();
+  };
+  const isVisible = (el) => !!el && el.getClientRects().length > 0;
+  const waitFor = async (check, timeoutMs, stepMs = 500) => {
+    const end = Date.now() + timeoutMs;
+    while (Date.now() < end) {
+      stopIfReplaced();
+      const value = check();
+      if (value) return value;
+      await sleep(stepMs);
+    }
+    return null;
+  };
+  // Waits until `root` stops changing for quietMs (gives up quietly after timeoutMs).
+  const waitForQuiet = (root, quietMs, timeoutMs) => new Promise((resolve) => {
+    if (!root) return resolve(false);
+    let lastChange = Date.now();
+    const observer = new MutationObserver(() => { lastChange = Date.now(); });
+    observer.observe(root, { subtree: true, childList: true, characterData: true });
+    const end = Date.now() + timeoutMs;
+    const tick = () => {
+      const isQuiet = Date.now() - lastChange >= quietMs;
+      if (isQuiet || Date.now() > end) {
+        observer.disconnect();
+        resolve(isQuiet);
+      } else {
+        setTimeout(tick, 250);
+      }
+    };
+    tick();
+  });
+  const isLoadingShown = (root = document) =>
+    Array.from(root.querySelectorAll('progress, [role="progressbar"]')).some(isVisible);
+  const clickable = (el) => (el && (el.closest('button, [role="button"]') || el)) || null;
+  // Plain page click (no Chrome "debugging" bar, so WhatsApp's menus don't close on us).
+  const pageClick = (el) => {
+    const rect = el.getBoundingClientRect();
+    const at = { bubbles: true, cancelable: true, view: window,
+                 clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+    el.dispatchEvent(new PointerEvent("pointerdown", at));
+    el.dispatchEvent(new MouseEvent("mousedown", at));
+    el.dispatchEvent(new PointerEvent("pointerup", at));
+    el.dispatchEvent(new MouseEvent("mouseup", at));
+    el.click();
+  };
+  const realClick = async (el) => {
+    el.scrollIntoView({ block: "center" });
+    await sleep(200);
+    const rect = el.getBoundingClientRect();
+    if (rect.width < 1 || rect.height < 1) { // nothing on screen to aim at
+      debugLog(`plain click (no size on screen): ${el.tagName.toLowerCase()}`);
+      el.click();
+      return;
+    }
+    const ok = await chrome.runtime.sendMessage({
+      type: "realClick", x: rect.left + rect.width / 2, y: rect.top + rect.height / 2,
+    });
+    if (!ok) el.click();
+  };
+  const base64ToBytes = (text) => {
+    const binary = atob(text);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+  };
+  const same = (a, b) => (a || "").trim().toLowerCase() === (b || "").trim().toLowerCase();
+
+  // ---------- steps ----------
+  const waitForWhatsappLoaded = async () => {
+    debugLog("waiting for WhatsApp to load");
+    const end = Date.now() + 180000;
+    let isReady = false;
+    while (Date.now() < end) {
+      if (isVisible(document.querySelector("#pane-side")) && !isLoadingShown()) {
+        isReady = true;
+        break;
+      }
+      const text = document.body ? document.body.innerText : "";
+      // "WhatsApp is open in another window" -> take it over here.
+      if (/open in another window/i.test(text)) {
+        const useHere = Array.from(document.querySelectorAll('button, [role="button"]'))
+          .find((el) => isVisible(el) && /^\s*use here\s*$/i.test(el.innerText || ""));
+        if (useHere) {
+          debugLog("WhatsApp was open in another window, clicking Use here");
+          pageClick(useHere);
+          await sleep(3000);
+          continue;
+        }
+      }
+      // Logged out: no point waiting for a QR code to scan itself.
+      if (document.querySelector('canvas[aria-label*="scan" i], [data-ref] canvas') ||
+          /scan (the )?qr code|log ?in(to)? (to )?whatsapp|link with phone number/i.test(text)) {
+        throw new Error("WhatsApp Web is logged out. Scan the QR code in Chrome with your phone, then share again.");
+      }
+      await sleep(1000);
+    }
+    if (!isReady) throw new Error("WhatsApp Web didn't finish loading within 3 minutes.");
+    await waitForQuiet(document.querySelector("#pane-side"), 2000, 30000);
+    await sleep(1000);
+  };
+
+  const chatHeader = () => document.querySelector("#main header") || document.querySelector("#main [data-testid*='header' i]");
+  // True when the open chat's header names the group (any line of it, or any title attribute).
+  const isChatOpen = () => {
+    const header = chatHeader();
+    if (!header) return false;
+    const lines = (header.innerText || "").split("\n").map((line) => line.trim());
+    const titles = Array.from(header.querySelectorAll("[title]")).map((el) => el.getAttribute("title"));
+    return [...lines, ...titles].some((text) => same(text, group));
+  };
+  const describeHeader = () => {
+    const header = chatHeader();
+    return `main=${!!document.querySelector("#main")} header=${!!header} ` +
+      `firstLine="${header ? (header.innerText || "").split("\n")[0].slice(0, 60) : ""}"`;
+  };
+
+  const findChatRow = () => Array.from(document.querySelectorAll("#pane-side span[title], #side span[title]"))
+    .find((span) => isVisible(span) && same(span.getAttribute("title"), group));
+
+  const openChat = async () => {
+    if (isChatOpen()) {
+      debugLog(`chat "${group}" already open`);
+      return;
+    }
+    let row = findChatRow();
+    if (!row) {
+      debugLog(`"${group}" not in the visible list, searching`);
+      const searchBox = Array.from(document.querySelectorAll(
+        '#side [contenteditable="true"], #side input[type="text"], [aria-label^="Search" i][contenteditable="true"]'))
+        .find(isVisible);
+      if (!searchBox) throw new Error("Couldn't find WhatsApp's search box.");
+      await realClick(searchBox);
+      await sleep(500);
+      await chrome.runtime.sendMessage({ type: "realType", text: group, pressEnter: false });
+      row = await waitFor(findChatRow, 20000);
+      if (!row) throw new Error(`Couldn't find a chat called "${group}".`);
+      await sleep(800);
+    }
+    debugLog(`opening chat "${group}"`);
+    await realClick(row); // the name itself: always inside the clickable chat row
+    if (!(await waitFor(isChatOpen, 20000))) {
+      debugLog(`chat check failed: ${describeHeader()}`);
+      throw new Error(`Clicked "${group}", but the chat didn't open.`);
+    }
+    debugLog(`chat "${group}" is open`);
+  };
+
+  const waitForMessagesLoaded = async () => {
+    debugLog("waiting for the chat's messages to load");
+    const main = document.querySelector("#main");
+    await waitFor(() => main.querySelector('[role="row"], [data-id], .message-in, .message-out'), 30000);
+    await waitFor(() => !isLoadingShown(main), 60000, 1000);
+    await waitForQuiet(main, 2500, 45000);
+    await sleep(1000);
+  };
+
+  const findCaptionBox = () => {
+    const boxes = Array.from(document.querySelectorAll('div[contenteditable="true"]'))
+      .filter((el) => isVisible(el) && !el.closest("#side") && !el.closest("#main footer"));
+    return boxes.find((el) => /caption/i.test(`${el.getAttribute("aria-label")} ${el.getAttribute("aria-placeholder")}`))
+      || boxes[0] || null;
+  };
+
+  const attachCsv = async () => {
+    const reply = await chrome.runtime.sendMessage({ type: "getFiles" });
+    if (!reply || !reply.files || !reply.files.length) {
+      throw new Error((reply && reply.error) || "Couldn't get the CSV from the app.");
+    }
+    const file = reply.files[0];
+    const transfer = new DataTransfer();
+    transfer.items.add(new File([base64ToBytes(file.data)], file.name, { type: "text/csv", lastModified: file.lastModified }));
+
+    // Leave the CSV in a hidden carrier box, and catch WhatsApp's "open the file picker" so it
+    // gets the carrier's file instead of showing Windows' dialog.
+    document.getElementById("kaam-file-carrier")?.remove();
+    const carrier = document.createElement("input");
+    carrier.type = "file";
+    carrier.id = "kaam-file-carrier";
+    carrier.style.display = "none";
+    carrier.files = transfer.files;
+    document.body.appendChild(carrier);
+    if (!(await chrome.runtime.sendMessage({ type: "whatsappHookFilePicker" }))) {
+      carrier.remove();
+      throw new Error("Couldn't prepare WhatsApp for the file.");
+    }
+
+    const attachIcon = document.querySelector(
+      '#main footer [data-icon="plus-rounded"], #main footer [data-icon="plus"], #main footer [data-icon="clip"], ' +
+      '#main footer [data-icon="attach-menu-plus"], #main footer [aria-label="Attach" i], #main footer [title="Attach" i]');
+    const hasSize = (el) => { const rect = el.getBoundingClientRect(); return rect.width > 4 && rect.height > 4; };
+    // The on-screen "Document" text in the attach menu, then the row you'd click.
+    const findDocumentItem = () => {
+      const label = Array.from(document.querySelectorAll("span, div, li, button"))
+        .filter((el) => hasSize(el) && /^\s*document\s*$/i.test(el.innerText || ""))
+        .sort((a, b) => a.getBoundingClientRect().width * a.getBoundingClientRect().height
+                      - b.getBoundingClientRect().width * b.getBoundingClientRect().height)[0];
+      if (!label) return null;
+      const row = label.closest('li, [role="button"], [role="menuitem"], button');
+      return row && hasSize(row) ? row : label;
+    };
+    // Plain page clicks here, not real ones: a real click shows Chrome's "debugging" bar for a
+    // moment, the page resizes, and WhatsApp closes its menu before we can pick Document.
+    if (!findDocumentItem()) { // the menu may still be open from before; + would close it
+      if (!attachIcon) {
+        carrier.remove();
+        throw new Error("Couldn't find WhatsApp's attach (+) button.");
+      }
+      debugLog("opening the attach menu");
+      pageClick(clickable(attachIcon));
+    }
+    const documentItem = await waitFor(findDocumentItem, 8000, 200);
+    if (!documentItem) {
+      carrier.remove();
+      throw new Error("Opened the attach menu, but its Document option wasn't found.");
+    }
+    await sleep(400); // let the menu finish opening
+    const docRect = documentItem.getBoundingClientRect();
+    debugLog(`choosing Document (${documentItem.tagName.toLowerCase()} at ${Math.round(docRect.left)},${Math.round(docRect.top)})`);
+    pageClick(documentItem);
+    if (!(await waitFor(() => !document.getElementById("kaam-file-carrier"), 8000))) {
+      // Structure only (tags, roles, positions, file boxes) - no message text.
+      const describe = (el) => {
+        const rect = el.getBoundingClientRect();
+        return `${el.tagName.toLowerCase()}${el.getAttribute("role") ? `[role=${el.getAttribute("role")}]` : ""}` +
+          `@${Math.round(rect.left)},${Math.round(rect.top)} ${Math.round(rect.width)}x${Math.round(rect.height)}`;
+      };
+      const chain = [];
+      for (let el = documentItem; el && chain.length < 6; el = el.parentElement) chain.push(describe(el));
+      const fileBoxes = Array.from(document.querySelectorAll('input[type="file"]'))
+        .map((input) => `${input.id || "?"}:${input.accept || "any"}`).join(" ");
+      debugLog(`document option: ${chain.join(" < ")}`);
+      debugLog(`file boxes now: ${fileBoxes || "none"} | menu still open: ${!!findDocumentItem()}`);
+      carrier.remove();
+      throw new Error("WhatsApp didn't take the CSV from the Document option.");
+    }
+    debugLog(`attached ${file.name}`);
+
+    const captionBox = await waitFor(findCaptionBox, 30000);
+    if (!captionBox) throw new Error("Attached the CSV, but WhatsApp's file preview didn't open.");
+    await waitForQuiet(document.body, 1500, 15000);
+    return { captionBox, fileName: file.name };
+  };
+
+  const typeCaption = async (captionBox) => {
+    debugLog("typing the report as the caption");
+    await realClick(captionBox);
+    await sleep(500);
+    const typed = await chrome.runtime.sendMessage({ type: "realTypeLines", lines: caption.split("\n") });
+    if (!typed) throw new Error("Couldn't type the caption.");
+    await sleep(1000);
+  };
+
+  // The preview's send button. WhatsApp renames its icons now and then, so match loosely.
+  const findSendButton = () => Array.from(document.querySelectorAll(
+    '[data-icon*="send" i], [aria-label*="send" i], [title*="send" i]'))
+    .filter((el) => isVisible(el) && el.getBoundingClientRect().width > 4 &&
+      !el.closest("#side") && !el.closest("#main footer") &&
+      !/send (document|message to)|resend/i.test(el.getAttribute("aria-label") || ""))
+    .map(clickable)[0] || null;
+
+  const pressSend = async (captionBox) => {
+    if (!(await chrome.runtime.sendMessage({ type: "stillWanted" }))) {
+      throw new Error("Stopped from the app - Send was not pressed.");
+    }
+    const sendButton = findSendButton();
+    if (sendButton) {
+      const icon = sendButton.querySelector("[data-icon]");
+      debugLog(`pressing Send (button: ${icon ? icon.getAttribute("data-icon") : sendButton.getAttribute("aria-label") || "?"})`);
+      pageClick(sendButton);
+      await waitFor(() => !findCaptionBox(), 6000);
+    }
+    // No button, or the click didn't take (preview still open, so nothing was sent):
+    // Enter in the caption box is WhatsApp's own "send" for the preview.
+    if (findCaptionBox()) {
+      debugLog(sendButton ? "the Send click didn't take, pressing Enter in the caption box"
+                          : "no Send button found, pressing Enter in the caption box");
+      await realClick(findCaptionBox() || captionBox);
+      await sleep(300);
+      await chrome.runtime.sendMessage({ type: "realType", text: "", pressEnter: true });
+    }
+    if (!(await waitFor(() => !findCaptionBox(), 30000))) {
+      throw new Error("Pressed Send, but the preview didn't close. Check WhatsApp.");
+    }
+    debugLog("sent - the preview closed");
+    await sleep(2000);
+  };
+
+  // On a retry, close the file preview a failed try may have left open (only then, so a
+  // draft from an earlier share is never touched).
+  const closeLeftoverPreview = async () => {
+    if (attempt < 2 || !findCaptionBox()) return;
+    debugLog(`try ${attempt}: closing the preview the failed try left open`);
+    const closeButton = Array.from(document.querySelectorAll('[data-icon="x"], [data-icon="close"], [aria-label="Close" i]'))
+      .find((el) => isVisible(el) && !el.closest("#side"));
+    if (closeButton) {
+      pageClick(clickable(closeButton));
+    } else {
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", keyCode: 27, bubbles: true }));
+    }
+    await waitFor(() => {
+      const discard = Array.from(document.querySelectorAll('button, [role="button"]'))
+        .find((el) => isVisible(el) && /^\s*discard\s*$/i.test(el.innerText || ""));
+      if (discard) pageClick(discard); // "Discard unsent message?"
+      return !findCaptionBox();
+    }, 8000);
+    await sleep(1000);
+  };
+
+  // ---------- run ----------
+  try {
+    if (attempt > 1) debugLog(`try ${attempt}`);
+    await waitForWhatsappLoaded();
+    await closeLeftoverPreview();
+    await openChat();
+    await waitForMessagesLoaded();
+    const { captionBox, fileName } = await attachCsv();
+    await typeCaption(captionBox);
+    if (send) {
+      await pressSend(captionBox);
+      finish({ ok: true, sent: true, summary: `Sent to "${group}" on WhatsApp: ${fileName} with the report.` });
+    } else {
+      finish({ ok: true, sent: false,
+               summary: `Ready in WhatsApp "${group}": ${fileName} attached and the report typed. Press Send.` });
+    }
+  } catch (error) {
+    if (error.message === replacedError) {
+      debugLog("stopped: a newer share took over");
+      return; // the newer share reports for itself
+    }
+    finish({ error: error.message });
+  }
+})();

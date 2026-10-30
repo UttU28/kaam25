@@ -1,0 +1,28 @@
+# Your settings (copy .env.example to .env)
+.env
+
+# Your ticket records, backups and logs - personal / work data, never public
+tickets.json
+tickets.deleted.json
+tickets.*.json
+tickets.broken-*
+*.tmp
+backups/
+kaamDebug.log
+*.log
+
+# Route maps contain WO locations
+maps/
+
+# Python
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# Editors / OS
+.vscode/
+.idea/
+.claude/
+Thumbs.db
+desktop.ini
