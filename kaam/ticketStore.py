@@ -240,37 +240,58 @@ def aliasKeys(record):
     return keys
 
 
+ePattern = re.compile(r"(G\d+)e(_)", re.IGNORECASE)
+
+
+def excelSpelling(wo):
+    """The plan's spelling of a TEMS-named WO: G23e -> G23d (the plans never have the e).
+    None when the WO has no G..e part."""
+    wo = wo or ""
+    excel = ePattern.sub(r"\1d\2", wo, count=1)
+    return excel if excel != wo else None
+
+
+def excelKeys(tickets):
+    """{key of a plan's spelling: key of the record it belongs to} - the names a record had in the
+    Excel before TEMS corrected it (aliases, excelWo, old renames), plus the G..d spelling of every
+    G..e record: a d row in a plan is that same WO."""
+    found = {}
+    for key, record in tickets.items():
+        names = aliasKeys(record)
+        for name in (record.get("excelWo"), excelSpelling(record.get("wo"))):
+            if name:
+                names.add(woKey(name))
+        for name in names - {key}:
+            if name not in tickets:
+                found.setdefault(name, key)
+    return found
+
+
 def importWorkOrders(rows, sourceName):
     """Save sheet rows (wo, gridKey, lat, long, cluster, ...) in one write. Existing records
     keep their progress; only the sheet's fields are added or refreshed.
-    The sheet's spelling wins: a not-started record that was renamed earlier (G23d -> G23e) goes back
-    to the sheet's name - only Start's TEMS check changes it again, when TEMS really has it
-    differently. A started one keeps its name (no copy is added).
+    A row in the plan's spelling of a WO TEMS has differently (G23d in the sheet, G23e in TEMS)
+    updates the record under its TEMS name - started or not, no copy is added - and the sheet's
+    spelling is kept on it as "excelWo".
     Returns (added, updated, alreadyStarted) counts."""
     added = updated = alreadyStarted = 0
     with storeLock:
         tickets = readFile()
-        renamed = {alias: key for key, record in tickets.items() for alias in aliasKeys(record)}
+        renamed = excelKeys(tickets)
         stamp = now()
         for order, row in enumerate(rows):
             key = woKey(row.get("wo"))
             if not key:
                 continue
             if key not in tickets and renamed.get(key) in tickets:
-                oldKey = renamed[key]
-                if tickets[oldKey].get("startedAt"):
-                    key = oldKey  # finished / in progress under the TEMS name: leave it as it is
-                else:
-                    record = tickets.pop(oldKey)
-                    before, sheetWo = record.get("wo") or "", row["wo"].strip()
-                    for field in ("folderName", "report"):
-                        if isinstance(record.get(field), str):
-                            record[field] = record[field].replace(before, sheetWo)
-                    record["wo"] = sheetWo
-                    record["aliases"] = [a for a in record.get("aliases") or [] if woKey(a) != key]
-                    record.setdefault("history", []).append(
-                        {"at": stamp, "event": f"Back to the sheet's name: {before} -> {sheetWo}"})
-                    tickets[key] = record
+                key = renamed[key]
+                record = tickets[key]
+                sheetWo = row["wo"].strip()
+                if record.get("excelWo") != sheetWo:
+                    record["excelWo"] = sheetWo
+                    record["aliases"] = sorted(set(record.get("aliases") or []) | {sheetWo})
+                record.setdefault("history", []).append(
+                    {"at": stamp, "event": f"In the sheet as {sheetWo} - kept the TEMS name {record.get('wo')}"})
             record = tickets.get(key)
             if record is None:
                 record = {"wo": row["wo"].strip(), "createdAt": stamp, "history": []}
@@ -311,6 +332,7 @@ def renameWo(oldWo, newWo):
             existing = tickets[newKey]
             stamp = now()
             existing["aliases"] = sorted(set(existing.get("aliases") or []) | {record.get("wo") or oldWo})
+            existing.setdefault("excelWo", record.get("wo") or oldWo)
             existing["updatedAt"] = stamp
             existing.setdefault("history", []).append(
                 {"at": stamp, "event": f"Same WO as {record.get('wo') or oldWo} (copy removed)"})
@@ -321,6 +343,7 @@ def renameWo(oldWo, newWo):
         before = record.get("wo") or oldWo
         newWo = newWo.strip()
         record["aliases"] = sorted(set(record.get("aliases") or []) | {before})
+        record.setdefault("excelWo", before)  # the plan's spelling, before the first correction
         for field in ("wo", "folderName", "report"):
             if isinstance(record.get(field), str):
                 record[field] = record[field].replace(before, newWo)
@@ -408,6 +431,9 @@ def findRecord(text):
         tickets = readFile()
     if woKey(text) in tickets:
         return tickets[woKey(text)], "wo"
+    owner = excelKeys(tickets).get(woKey(text))
+    if owner in tickets:
+        return tickets[owner], "excelWo"
     squash = lambda value: re.sub(r"\s+", "", str(value or "")).lower()
     for field in ("gridKey", "ticketId"):
         matches = [record for record in tickets.values()

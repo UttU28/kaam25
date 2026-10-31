@@ -211,6 +211,7 @@ export default {
       if (busy) return;
       busy = true; update();
       msg(isLocal() ? "Local start: copying GridSummary and uploading…" : "Searching TechInsights in your Chrome…", "info");
+      let allDone = false;
       try {
         const { job: started } = await api("/api/end/run", { body: { wo } });
         const done = await job.run(started, (j) => {
@@ -218,6 +219,7 @@ export default {
           Object.entries(j.data.jobIds || {}).forEach(([eq, id]) => { if (inputs[eq.toLowerCase()]) inputs[eq.toLowerCase()].value = id; });
           update();
         });
+        allDone = done.state === "done" && done.result.ok;
         if (done.state === "done") msg(done.result.ok ? "Done - check the report, then WhatsApp and Done." : "Finished with problems - see below. Run it again to finish.", done.result.ok ? "ok" : "warn");
         else msg(done.state === "stopped" ? "Stopped by you." : "Stopped - see the error below.", "bad");
       } catch (error) {
@@ -227,6 +229,15 @@ export default {
         await reloadRecord();
         await quietSave();
         refreshState();
+      }
+      // Everything is in (Ticket ID, both EQ Job IDs, GridSummary renamed): share on WhatsApp by itself.
+      // Not twice - a WO already shared is left for you to share again by hand.
+      if (allDone && store.settings?.whatsappAutoShare !== false && box.get() === wo) {
+        const missing = [!record?.ticketId && "Ticket ID", !record?.gridSummaryPath && "GridSummary file",
+          ...(settings.equipments || ["EQ3", "EQ6"]).filter((eq) => !record?.[eq.toLowerCase()])].filter(Boolean);
+        if (missing.length) msg(`Not shared on WhatsApp yet - missing ${missing.join(", ")}.`, "warn");
+        else if (record?.whatsappSentAt) msg("All done. Already shared on WhatsApp before - press WhatsApp to share again.", "ok");
+        else await shareWhatsapp(q(".wa"), "All done - sharing on WhatsApp by itself…");
       }
     }
 
@@ -249,13 +260,13 @@ export default {
       quietSave();
     }
     q(".copyReport").addEventListener("click", (e) => copyReport(e.currentTarget));
-    q(".wa").addEventListener("click", async (e) => {
+    q(".wa").addEventListener("click", (e) => shareWhatsapp(e.currentTarget));
+    async function shareWhatsapp(button, startText = "Sharing on WhatsApp…") {
       const wo = box.get();
       if (!wo) return msg("Enter a WO first.", "bad");
-      const button = e.currentTarget;
       button.disabled = true;
       await quietSave();
-      msg("Sharing on WhatsApp… (waiting for WhatsApp to load fully)", "info");
+      msg(`${startText} (waiting for WhatsApp to load fully)`, "info");
       try {
         const { job: started } = await api("/api/whatsapp", { body: { wo, report: q(".report").textContent, send: wa.get() } });
         const done = await job.run(started);
@@ -263,7 +274,7 @@ export default {
         else msg(done.error || "Stopped.", "bad");
       } catch (error) { msg(error.message, "bad"); }
       finally { button.disabled = false; reloadRecord(); }
-    });
+    }
     function clearForm() {
       box.set(""); record = null; loadedKey = null;
       Object.values(inputs).forEach((i) => (i.value = ""));

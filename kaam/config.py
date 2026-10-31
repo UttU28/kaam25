@@ -100,6 +100,8 @@ ticketStoreFile = getPath("TICKET_STORE_FILE")
 whatsappGroup = getSetting("WHATSAPP_GROUP").strip()
 whatsappSend = getBool("WHATSAPP_SEND")
 whatsappRetries = max(0, getInt("WHATSAPP_RETRIES"))
+# End: share on WhatsApp by itself once Find in Chrome / Upload got everything (default on).
+whatsappAutoShare = (os.environ.get("WHATSAPP_AUTO_SHARE") or "true").strip().lower() in ("1", "true", "yes", "on")
 
 # ---------- Apeksha (share a location to your site) ----------
 # Optional in .env; defaults to your site.

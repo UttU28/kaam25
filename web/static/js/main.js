@@ -7,11 +7,13 @@ import end from "./pages/end.js";
 import close from "./pages/close.js";
 import records from "./pages/records.js";
 import settings from "./pages/settings.js";
+import maps from "./pages/maps.js";
 
-const pages = { today, start, end, close, records, settings };
+const pages = { today, maps, start, end, close, records, settings };
 const navItems = [
   ["Work", null],
   ["today", "Today", "today", "var(--accent)"],
+  ["maps", "Maps", "map", "var(--green)"],
   ["start", "Start Ticket", "rocket", "var(--accent)", "toStart"],
   ["end", "End Ticket", "end", "var(--green)", "open"],
   ["close", "Close Ticket", "lock", "var(--amber)", "readyToClose"],

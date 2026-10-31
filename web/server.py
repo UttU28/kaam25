@@ -183,6 +183,181 @@ def state():
     })
 
 
+def woDate(wo):
+    """The drive date written in a WO name (..._103026_... = Oct 30 2026), or None."""
+    import re
+    match = re.search(r"_(\d{2})(\d{2})(\d{2})_", str(wo or ""))
+    if not match:
+        return None
+    try:
+        return datetime(2000 + int(match.group(3)), int(match.group(1)), int(match.group(2))).date()
+    except ValueError:
+        return None
+
+
+routeOrderFile = Path(config.appDir) / "maps" / "routeOrders.json"  # your hand-made stop orders, per day
+routeOrderLock = threading.Lock()
+
+
+def readRouteOrders():
+    import json
+    try:
+        return json.loads(routeOrderFile.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+@app.get("/api/map")
+def mapPoints():
+    """One day's WOs with coordinates for the Maps page (?date=YYYY-MM-DD, default today).
+    Driven that day (started or ended then): completed / doing - their start (else end) time is the
+    order you drove them in. The rest of that day's list (Records' day, plus Start's To start list
+    today) is pending today, missed on a past day."""
+    today = datetime.now().date()
+    dayText = request.args.get("date") or today.isoformat()
+    try:
+        day = datetime.fromisoformat(dayText).date()
+    except ValueError:
+        return fail("That's not a date.")
+    dayText = day.isoformat()
+    isToday = day == today
+    records = searchRecords("")
+
+    picked, days = {}, {today.isoformat()}
+    for record in records:
+        for field in ("startedAt", "endedAt"):
+            if len(record.get(field) or "") >= 10:
+                days.add(record[field][:10])
+        started = (record.get("startedAt") or "").startswith(dayText)
+        ended = (record.get("endedAt") or "").startswith(dayText)
+        if started or ended:
+            picked[woKey(record.get("wo"))] = (record, "completed" if record.get("endedAt") else "doing")
+    for record in records:  # the day's list, as in Records (imported / moved / created that day)
+        key = woKey(record.get("wo"))
+        if key not in picked and not record.get("startedAt") and (recordDay(record) or "").startswith(dayText):
+            picked[key] = (record, "pending" if isToday else "missed")
+    if isToday:  # plus everything on Start's To start list (imported or moved to today)
+        for record in notStartedRecords():
+            picked.setdefault(woKey(record.get("wo")), (record, "pending"))
+
+    points, noLocation = [], []
+    for record, category in picked.values():
+        lat, lon = workflows.latLong(record)
+        try:
+            lat, lon = float(lat), float(lon)
+        except (TypeError, ValueError):
+            noLocation.append(record.get("wo"))
+            continue
+        woDay = woDate(record.get("wo"))
+        points.append({**summary(record), "lat": lat, "lon": lon, "category": category,
+                       "woDate": woDay.isoformat() if woDay else None,
+                       "drivenAt": record.get("startedAt") or record.get("endedAt")})
+    with routeOrderLock:
+        saved = readRouteOrders().get(dayText)
+    return jsonify({"date": dayText, "isToday": isToday, "dates": sorted(days, reverse=True),
+                    "points": points, "noLocation": noLocation, "savedOrder": saved})
+
+
+@app.post("/api/map/order")
+def mapOrderSave():
+    """Save your own order of the stops still to drive on a day ({date, keys}); keys empty = back to
+    the shortest order."""
+    import json
+    data = body()
+    dayText = str(data.get("date") or "")
+    try:
+        datetime.fromisoformat(dayText)
+    except ValueError:
+        return fail("That's not a date.")
+    keys = [str(key) for key in (data.get("keys") or []) if key]
+    with routeOrderLock:
+        orders = readRouteOrders()
+        if keys:
+            orders[dayText] = keys
+        else:
+            orders.pop(dayText, None)
+        orders = {d: orders[d] for d in sorted(orders, reverse=True)[:60]}  # keep the last 60 days
+        routeOrderFile.parent.mkdir(parents=True, exist_ok=True)
+        temp = routeOrderFile.with_suffix(".tmp")
+        temp.write_text(json.dumps(orders, indent=1), encoding="utf-8")
+        os.replace(temp, routeOrderFile)
+    return jsonify({"ok": True, "savedOrder": keys or None})
+
+
+routeSequenceFile = Path(config.appDir) / "maps" / "routeSequence.json"  # the map's stop order, per day
+
+
+def readRouteSequences():
+    import json
+    try:
+        return json.loads(routeSequenceFile.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+@app.post("/api/map/sequence")
+def mapSequenceSave():
+    """The Maps page sends today's stops still to drive, in its order (shortest or yours): Start
+    Ticket lists its WOs in this order."""
+    import json
+    data = body()
+    dayText = str(data.get("date") or "")
+    if dayText != datetime.now().date().isoformat():
+        return jsonify({"ok": False})
+    keys = [str(key) for key in (data.get("keys") or []) if key]
+    with routeOrderLock:
+        sequences = readRouteSequences()
+        sequences[dayText] = keys
+        sequences = {d: sequences[d] for d in sorted(sequences, reverse=True)[:14]}
+        routeSequenceFile.parent.mkdir(parents=True, exist_ok=True)
+        temp = routeSequenceFile.with_suffix(".tmp")
+        temp.write_text(json.dumps(sequences, indent=1), encoding="utf-8")
+        os.replace(temp, routeSequenceFile)
+    return jsonify({"ok": True})
+
+
+def inMapOrder(records):
+    """Start's list in today's map order. WOs the map hasn't placed yet (just moved to today or
+    imported) go in where they add the least straight-line distance; ones without a location last."""
+    import math
+    today = datetime.now().date().isoformat()
+    with routeOrderLock:
+        order = readRouteSequences().get(today) or readRouteOrders().get(today) or []
+    if not order:
+        return records, 0
+    byKey = {woKey(r.get("wo")): r for r in records}
+    route = [byKey[k] for k in order if k in byKey]
+    placed = set(order)
+    rest = [r for r in records if woKey(r.get("wo")) not in placed]
+
+    def spot(record):
+        lat, lon = workflows.latLong(record)
+        try:
+            return float(lat), float(lon)
+        except (TypeError, ValueError):
+            return None
+
+    def far(a, b):
+        (la1, lo1), (la2, lo2) = a, b
+        x = math.radians(lo2 - lo1) * math.cos(math.radians((la1 + la2) / 2))
+        return math.hypot(x, math.radians(la2 - la1))
+
+    noSpot = []
+    for record in rest:
+        here = spot(record)
+        spots = [spot(r) for r in route]
+        if here is None or not route or None in spots:
+            (noSpot if here is None else route).append(record)
+            continue
+        best, bestCost = len(route), far(spots[-1], here)
+        for i in range(len(route)):
+            cost = far(here, spots[i]) - (far(spots[i - 1], spots[i]) if i else 0) + (far(spots[i - 1], here) if i else 0)
+            if cost < bestCost:
+                best, bestCost = i, cost
+        route.insert(best, record)
+    return route + noSpot, len(route)
+
+
 @app.get("/api/settings")
 def settings():
     return jsonify({
@@ -194,6 +369,7 @@ def settings():
         "statusOptions": workflows.statusOptions, "equipments": config.equipments,
         "folderNamePrefix": config.folderNamePrefix, "whatsappGroup": config.whatsappGroup,
         "whatsappSend": config.whatsappSend, "whatsappRetries": config.whatsappRetries,
+        "whatsappAutoShare": config.whatsappAutoShare,
         "temsTestMode": config.temsTestMode, "temsProject": config.temsProject, "temsAssignWo": config.temsAssignWo,
         "actixSubmit": config.actixSubmit, "closeTabsWhenDone": config.closeTabsWhenDone,
         "paths": {"Tickets file": str(config.ticketStoreFile), "Drive logs": str(config.logRootDir),
@@ -333,7 +509,8 @@ def recordSendLocation(wo):
 # ---------- start ----------
 @app.get("/api/start/waiting")
 def startWaiting():
-    return jsonify([summary(r) for r in notStartedRecords()])
+    records, stops = inMapOrder(notStartedRecords())
+    return jsonify([{**summary(r), "mapStop": n + 1 if n < stops else None} for n, r in enumerate(records)])
 
 
 @app.post("/api/start")

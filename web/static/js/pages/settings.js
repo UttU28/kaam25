@@ -1,5 +1,5 @@
 // Settings: edit every .env value (checked, saved after you confirm, then the app restarts
-// itself), the WhatsApp Send switch and the Chrome extension connection.
+// itself) and the Chrome extension connection.
 import { $, $$, ago, api, esc, icon, modal, niceTime, setWhatsappSend, store, toast } from "../core.js";
 import { switchEl } from "../components.js";
 
@@ -18,7 +18,8 @@ export default {
     const b = s.bridge;
     const fresh = b.lastContactAt && Date.now() / 1000 - b.lastContactAt < 75;
     const groups = [...new Set(env.fields.map((f) => f.group))];
-    const original = Object.fromEntries(env.fields.map((f) => [f.key, f.value]));
+    // An empty optional setting shows the built-in value the app is using, so nothing looks blank.
+    const original = Object.fromEntries(env.fields.map((f) => [f.key, f.value === "" && f.default != null ? f.default : f.value]));
     const values = { ...original };
 
     // What the last Save changed - kept across the restart, shown once at the top.
@@ -37,25 +38,16 @@ export default {
       ${justSaved.length ? `<div class="callout ok" style="margin-bottom:16px">${icon("check", "sm")}<div>
           <b>Saved and restarted - ${justSaved.length} setting${justSaved.length === 1 ? "" : "s"} changed:</b>
           <div class="changeList" style="margin-top:8px">${justSaved.map(changeRow).join("")}</div></div></div>` : ""}
-      <div class="grid cols2" style="align-items:start">
-        <div class="card">
-          <div class="cardHead"><h2>Chrome extension</h2></div>
-          <div class="cardBody stack">
-            <div class="row"><span class="dot ${b.running ? (fresh ? "on" : "warn") : "off"}"></span>
-              <b>${b.running ? (fresh ? "Connected" : "Waiting for the extension") : "Bridge not running"}</b>
-              <span class="note">${b.running ? `port ${b.port} · last check-in ${ago(b.lastContactAt)}` : ""}</span></div>
-            ${b.error ? `<div class="callout bad">${icon("alert", "sm")}<div>${esc(b.error)}</div></div>` : ""}
-            ${b.running && !fresh ? `<div class="callout warn">${icon("info", "sm")}<div>The extension checks in every 30 seconds. If it never shows as connected, open chrome://extensions and click reload on Kaam25 Helper.</div></div>` : ""}
-            <div class="note">Extension on disk: v${esc(b.diskVersion || "?")}${b.extensionVersion ? ` · running in Chrome: v${esc(b.extensionVersion)}` : ""}</div>
-            ${b.running ? "" : `<div><button class="btn btnPrimary startBridge">${icon("plug", "sm")}<span>Start the bridge</span></button></div>`}
-          </div>
-        </div>
-        <div class="card">
-          <div class="cardHead"><h2>WhatsApp Send</h2></div>
-          <div class="cardBody stack">
-            <div class="waSlot"></div>
-            <div class="note">Used by WhatsApp on End and Records, right away. Remembered in this browser.</div>
-          </div>
+      <div class="card">
+        <div class="cardHead"><h2>Chrome extension</h2></div>
+        <div class="cardBody stack">
+          <div class="row"><span class="dot ${b.running ? (fresh ? "on" : "warn") : "off"}"></span>
+            <b>${b.running ? (fresh ? "Connected" : "Waiting for the extension") : "Bridge not running"}</b>
+            <span class="note">${b.running ? `port ${b.port} · last check-in ${ago(b.lastContactAt)}` : ""}</span></div>
+          ${b.error ? `<div class="callout bad">${icon("alert", "sm")}<div>${esc(b.error)}</div></div>` : ""}
+          ${b.running && !fresh ? `<div class="callout warn">${icon("info", "sm")}<div>The extension checks in every 30 seconds. If it never shows as connected, open chrome://extensions and click reload on Kaam25 Helper.</div></div>` : ""}
+          <div class="note">Extension on disk: v${esc(b.diskVersion || "?")}${b.extensionVersion ? ` · running in Chrome: v${esc(b.extensionVersion)}` : ""}</div>
+          ${b.running ? "" : `<div><button class="btn btnPrimary startBridge">${icon("plug", "sm")}<span>Start the bridge</span></button></div>`}
         </div>
       </div>
       <div class="setGroups">${groups.map((group) => `
@@ -84,12 +76,12 @@ export default {
       if (f.type === "bool") control = `<div class="boolSlot" data-key="${f.key}"></div>`;
       else if (f.type === "choice") {
         control = `<select class="input" id="${id}" data-key="${f.key}">${f.options.map((o) =>
-          `<option ${o === f.value ? "selected" : ""}>${esc(o)}</option>`).join("")}</select>`;
+          `<option ${o === original[f.key] ? "selected" : ""}>${esc(o)}</option>`).join("")}</select>`;
       } else {
         const type = f.type === "int" ? "number" : f.type === "time" ? "time" : "text";
         control = `<input class="input ${monoTypes.has(f.type) ? "mono" : ""}" id="${id}" data-key="${f.key}" type="${type}"
           ${f.type === "int" ? `min="${f.min ?? 0}" max="${f.max ?? ""}"` : ""} ${f.type === "readonly" ? "readonly" : ""}
-          spellcheck="false" autocomplete="off" placeholder="${f.optional ? "empty = built-in default" : ""}" value="${esc(f.value)}">`;
+          spellcheck="false" autocomplete="off" placeholder="${f.optional ? "empty = built-in default" : ""}" value="${esc(original[f.key])}">`;
       }
       return `<div class="field setField" data-field="${f.key}">
           <label class="label" for="${id}">${esc(f.label)}<span class="setKey">${esc(f.key)}</span></label>
@@ -97,9 +89,6 @@ export default {
     }
 
     // ----- controls -----
-    const wa = switchEl((on) => on ? "<b>Send ON</b> · presses Send in WhatsApp" : "<b>Send OFF</b> · fills the message, you press Send",
-      store.whatsappSend, (on) => { setWhatsappSend(on); toast(`WhatsApp: Send ${on ? "ON" : "OFF"}`, "info"); }, "var(--wa)");
-    $(".waSlot", root).replaceWith(wa.el);
     const switches = {};
     $$(".boolSlot", root).forEach((slot) => {
       const key = slot.dataset.key;
@@ -154,6 +143,7 @@ export default {
         paint();
         return;
       }
+      if (changed.includes("WHATSAPP_SEND")) setWhatsappSend(values.WHATSAPP_SEND === "true");  // End's switch follows
       (saved.warnings || []).forEach((w) => toast(w, "warn", 9000));
       try { sessionStorage.setItem(justSavedKey, JSON.stringify(saved.changes || [])); } catch { /* storage blocked */ }
       await restartAndReload();

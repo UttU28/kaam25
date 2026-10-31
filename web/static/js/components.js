@@ -1,7 +1,7 @@
 // Reusable pieces: WO box, location card, segmented control, switch, job panel.
 import { $, $$, api, cleanWo, copyWithFlash, debounce, enc, esc, flash, h, icon, stopAll, toast, watchJob } from "./core.js";
 
-const matchedNames = { gridKey: "Grid key", ticketId: "Ticket ID" };
+const matchedNames = { gridKey: "Grid key", ticketId: "Ticket ID", excelWo: "The Excel spelling" };
 
 // ---------- WO box ----------
 // opts: label, placeholder, picker {label, empty, load: async () => [{wo, title, sub, badge}]},

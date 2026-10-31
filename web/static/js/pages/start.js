@@ -69,7 +69,7 @@ export default {
       picker: {
         label: "To start", empty: "Nothing for today. Import today's plan, or use Move to today in Records for older ones.",
         load: async () => (await api("/api/start/waiting")).map((r) => ({
-          wo: r.wo, title: r.cluster || r.wo, sub: r.gridKey ? `${r.gridKey}${r.gridCount > 1 ? ` · ${r.gridCount} grids` : ""}` : r.wo,
+          wo: r.wo, title: `${r.mapStop ? `${r.mapStop}. ` : ""}${r.cluster || r.wo}`, sub: r.gridKey ? `${r.gridKey}${r.gridCount > 1 ? ` · ${r.gridCount} grids` : ""}` : r.wo,
         })),
       },
       onResolve: (wo, record, matchedBy) => {
@@ -83,7 +83,7 @@ export default {
         if (record?.importedAt && wo) {
           msg(`Found in your imported list${record.cluster ? ` (${record.cluster})` : ""}, ${record.startedAt ? "already started" : "not started yet"}. Grid key and location loaded.`, "info");
         } else if (record && matchedBy && matchedBy !== "wo") {
-          msg(`Matched this WO (${record.startedAt ? "already started" : "not started yet"}).`, "info");
+          msg(matchedBy === "excelWo" ? `This is the Excel spelling of ${wo} (TEMS name) - ${record.startedAt ? "already started" : "not started yet"}. Using ${wo}.` : `Matched this WO (${record.startedAt ? "already started" : "not started yet"}).`, "info");
         } else resetMsg();
       },
       onEnter: () => startClicked(),
@@ -133,9 +133,10 @@ export default {
       let list = [];
       try { list = await api("/api/start/waiting"); } catch (e) { toast(e.message, "bad"); }
       box.setPickerCount(list.length);
-      $(".waitCount", root).textContent = list.length ? `${list.length} for today` : "";
+      $(".waitCount", root).textContent = list.length ? `${list.length} for today${list[0].mapStop ? " · map order" : ""}` : "";
       $(".waiting", root).innerHTML = list.length ? list.map((r) => `
           <div class="listItem" data-wo="${esc(r.wo)}">
+            ${r.mapStop ? `<span class="mapStop" title="Stop ${r.mapStop} on today's map">${r.mapStop}</span>` : ""}
             <div style="min-width:0;flex:1"><div class="t1">${esc(r.cluster || r.wo)}</div><div class="t2">${esc(r.gridKey || r.wo)}${r.gridCount > 1 ? ` · ${r.gridCount} grids` : ""}</div></div>
             ${r.hasLocation ? `<span title="Has a location" style="color:var(--faint)">${icon("pin", "sm")}</span>` : ""}
             <span style="color:var(--faint)">${icon("arrow", "sm")}</span>

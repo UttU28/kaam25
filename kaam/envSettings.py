@@ -14,7 +14,7 @@ from pathlib import Path
 
 from dotenv import dotenv_values
 
-from .config import appDir, envPath
+from .config import apekshaUrl, appDir, envPath, temsProject, temsUrl
 
 # (key, group, label, type, help, extra). type: text url email bool int time choice dir path list readonly
 # extra: optional=True (may be empty: the app uses its default), keepSpaces=True, options=[...], min/max.
@@ -46,20 +46,19 @@ fields = [
     ("ACTIX_SUBMIT", "Automation", "ActixOne: click Submit", "bool", "On: submits and saves the Job ID. Off: stops before Submit.", {}),
     ("CLOSE_TABS_WHEN_DONE", "Automation", "Close tabs when done", "bool", "Close a tab the app opened once its job fully finished.", {}),
     # ---------- TEMS ----------
-    ("TEMS_TEST_MODE", "TEMS", "TEMS test mode", "bool",
-     "Off (prod): after a start, Reserve and Open the WO in TEMS for real. On (test): asks for a Cloud WO and an Assign WO and only checks the buttons - nothing is clicked.",
-     {"optional": True}),
-    ("TEMS_PROJECT", "TEMS", "TEMS Cloud project", "text", "Project that lists the WOs to reserve (changes each month). Empty = built-in default.", {"optional": True}),
-    ("TEMS_ASSIGN_WO", "TEMS", "Test mode: Assign WO", "text", "Test mode only: the Assign WO the test popup starts with.", {"optional": True}),
-    ("TEMS_URL", "TEMS", "TEMS Paragon address", "url", "Empty = http://localhost:8080/ (the extension only works there).", {"optional": True}),
+    ("TEMS_PROJECT", "TEMS", "TEMS Cloud project", "text", "Project that lists the WOs to reserve (changes each month).", {"optional": True, "default": temsProject}),
+    ("TEMS_URL", "TEMS", "TEMS Paragon address", "url", "The extension only works on http://localhost:8080/.", {"optional": True, "default": temsUrl}),
     # ---------- WhatsApp ----------
     ("WHATSAPP_GROUP", "WhatsApp", "Group name", "text", "Chat name exactly as it shows in WhatsApp.", {}),
-    ("WHATSAPP_SEND", "WhatsApp", "Press Send (default)", "bool", "Where the Send switch starts; you can still flip it on the page.", {}),
+    ("WHATSAPP_SEND", "WhatsApp", "Press Send", "bool", "On: presses Send in WhatsApp. Off: fills the message, you press Send. End's Send switch starts here (saving this resets it).", {}),
+    ("WHATSAPP_AUTO_SHARE", "WhatsApp", "Share by itself after End", "bool",
+     "On: once Find in Chrome / Upload has the Ticket ID, both EQ Job IDs and the renamed GridSummary, End shares on WhatsApp by itself. Off: you press WhatsApp.",
+     {"optional": True, "default": "true"}),
     ("WHATSAPP_RETRIES", "WhatsApp", "Retries", "int", "Extra tries when a share fails (5 s apart).", {"min": 0, "max": 10}),
     # ---------- Web pages ----------
     ("TICKETS_URL", "Web pages", "TechInsights tickets page", "url", "", {}),
     ("ACTIX_UPLOAD_URL", "Web pages", "ActixOne upload page", "url", "", {}),
-    ("APEKSHA_URL", "Web pages", "Apeksha site", "url", "Where Send location posts coordinates. Empty = built-in default.", {"optional": True}),
+    ("APEKSHA_URL", "Web pages", "Apeksha site", "url", "Where Send location posts coordinates.", {"optional": True, "default": apekshaUrl}),
     # ---------- Chrome ----------
     ("CHROME_PATHS", "Chrome", "chrome.exe paths", "text", "First one that exists is used. Separate with ;", {}),
     ("CHROME_USER_DATA_DIR", "Chrome", "Chrome user data folder", "dir", "Used to find your last-used Chrome profile.", {}),
