@@ -302,6 +302,15 @@ export default {
     if (params.get("wo")) {
       box.set(params.get("wo"));
       setTimeout(() => msg(`Carried over. Press Enter (or ${runLabel()}) to continue.`, "info"), 400);
+    } else {
+      // Nothing carried over: pick today's open WO you started first (we end in the order we started).
+      api("/api/end/open").then((open) => {
+        if (box.get() || !open.length) return;
+        const first = open.slice().sort((a, b) => (a.startedAt || "").localeCompare(b.startedAt || ""))[0];
+        box.set(first.wo);
+        msg(open.length > 1 ? `Picked the one you started first (${open.length} open). Press Enter (or ${runLabel()}) to continue.`
+          : `Picked today's open WO. Press Enter (or ${runLabel()}) to continue.`, "info");
+      }).catch(() => {});
     }
     setTimeout(() => box.focus(), 50);
 

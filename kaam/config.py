@@ -101,6 +101,8 @@ whatsappGroup = getSetting("WHATSAPP_GROUP").strip()
 whatsappSend = getBool("WHATSAPP_SEND")
 whatsappRetries = max(0, getInt("WHATSAPP_RETRIES"))
 # End: share on WhatsApp by itself once Find in Chrome / Upload got everything (default on).
+# On: phones/PCs on the same WiFi can open the app at http://<this PC's IP>:5000.
+lanAccess = (os.environ.get("LAN_ACCESS") or "true").strip().lower() in ("1", "true", "yes", "on")
 whatsappAutoShare = (os.environ.get("WHATSAPP_AUTO_SHARE") or "true").strip().lower() in ("1", "true", "yes", "on")
 
 # ---------- Apeksha (share a location to your site) ----------

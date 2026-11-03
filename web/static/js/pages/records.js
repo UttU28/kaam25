@@ -29,19 +29,67 @@ export default {
     let list = [], filter = params.get("filter") || "all", selected = params.get("wo") || null, detailShown = false;
     const checked = new Set();
 
-    root.innerHTML = `
+    // Half width: one page scroll, list OR details (tap a record -> its details; Back / ‹ › to move on).
+    // Full width: list on the left, details on the right, as before.
+    const narrow = window.matchMedia("(max-width: 1180px)");
+    root.innerHTML = `<div class="recPage ${selected ? "showDetail" : ""}">
       <div class="recToolbar">
         <div class="searchBox">${icon("search")}
           <input class="input search" placeholder="Search WO, Ticket ID, grid key, EQ Job ID, cluster…" spellcheck="false"></div>
         <span class="note count"></span>
-        <button class="btn btnPurple move">${icon("calendar", "sm")}<span>Move to today</span></button>
+        <div class="bulkBar">
+          <button class="btn btnGhost selAll">${icon("check", "sm")}<span>Select all pending</span></button>
+          <button class="btn btnPurple move hidden">${icon("calendar", "sm")}<span>Move to today</span></button>
+          <button class="btn btnGhost done hidden">${icon("check", "sm")}<span>Mark done</span></button>
+          <button class="btn btnDanger del hidden">${icon("x", "sm")}<span>Delete</span></button>
+        </div>
       </div>
       <div class="filters"></div>
       <div class="records">
         <div class="card recList"></div>
-        <div class="card detail"><div class="empty">${icon("records")}<p>Pick a record on the left.</p></div></div>
-      </div>`;
+        <div class="detailCol">
+          <div class="detailNav">
+            <button class="btn btnGhost back">${icon("arrow", "sm")}<span>All records</span></button>
+            <span class="pos note"></span>
+            <button class="iconBtn prev" title="Previous record">${icon("chevron", "sm")}</button>
+            <button class="iconBtn next" title="Next record">${icon("chevron", "sm")}</button>
+          </div>
+          <div class="card detail"><div class="empty">${icon("records")}<p>Pick a record on the left.</p></div></div>
+        </div>
+      </div></div>`;
     const q = (s) => $(s, root);
+    const page = q(".recPage");
+    let listScroll = 0;
+    function showDetail() {
+      if (!narrow.matches || page.classList.contains("showDetail")) return;
+      listScroll = window.scrollY;
+      page.classList.add("showDetail");
+      window.scrollTo(0, 0);
+    }
+    function showList() {
+      if (!page.classList.contains("showDetail")) return;
+      page.classList.remove("showDetail");
+      if (!narrow.matches) return;
+      window.scrollTo(0, listScroll);
+      const row = $(".rec.sel", root);
+      if (row) { const r = row.getBoundingClientRect(); if (r.top < 70 || r.bottom > innerHeight) row.scrollIntoView({ block: "center" }); }
+    }
+    function paintPos() {
+      const i = lastShown.findIndex((r) => keyOf(r.wo) === keyOf(selected));
+      q(".pos").textContent = i >= 0 ? `${i + 1} of ${lastShown.length}` : "";
+      q(".prev").disabled = i <= 0;
+      q(".next").disabled = i < 0 || i >= lastShown.length - 1;
+    }
+    function step(by) {
+      const i = lastShown.findIndex((r) => keyOf(r.wo) === keyOf(selected));
+      const r = lastShown[i + by];
+      if (!r) return;
+      select(r.wo);
+      if (narrow.matches) window.scrollTo(0, 0);
+    }
+    q(".back").addEventListener("click", showList);
+    q(".prev").addEventListener("click", () => step(-1));
+    q(".next").addEventListener("click", () => step(1));
 
     async function load() {
       try { list = await api(`/api/records?q=${enc(q(".search").value)}`); }
@@ -58,6 +106,7 @@ export default {
       q(".count").textContent = `${shown.length} record${shown.length === 1 ? "" : "s"}`;
       const keys = new Set(shown.filter((r) => r.progress === "notStarted").map((r) => r.key));
       [...checked].forEach((k) => { if (!keys.has(k)) checked.delete(k); });
+      lastShown = shown;
       paintMove();
 
       const dayCounts = {};
@@ -71,29 +120,75 @@ export default {
           : r.startedAt ? `Started ${clock(r.startedAt)}` : r.importedAt ? "Imported" : "";
         html += `<div class="rec ${keyOf(r.wo) === keyOf(selected) ? "sel" : ""}" data-key="${esc(r.key)}" data-wo="${esc(r.wo)}">
             ${r.progress === "notStarted"
-              ? `<input type="checkbox" class="check" ${checked.has(r.key) ? "checked" : ""} title="Tick to move to today">`
+              ? `<input type="checkbox" class="check" ${checked.has(r.key) ? "checked" : ""} title="Tick to move to today, mark done or delete">`
               : "<span></span>"}
             <div class="main">
               <div class="wo" title="${esc(r.wo)}">${esc(r.wo)}</div>
               <div class="sub">${esc(r.ticketId || "no ticket")} · ${eq}</div>
               <div class="tags">${typeBadge(r.startType)}${progressBadge(r)}</div>
             </div>
-            <div class="side">${statusBadge(r.status) || ""}<span class="time">${time}</span>${r.startedAt ? waDot(r) : ""}</div>
+            <div class="side">${statusBadge(r.status) || ""}<span class="time">${time}</span>${r.startedAt && r.startType !== "manual" ? waDot(r) : ""}</div>
           </div>`;
       }
       q(".recList").innerHTML = html || `<div class="empty">${icon("search")}<p>${q(".search").value ? "No matches." : "No records yet."}</p></div>`;
       const inList = selected && shown.some((r) => keyOf(r.wo) === keyOf(selected));
       if (inList && !detailShown) select(selected);
       else if (!inList && shown[0] && (!selected || (!q(".search").value && filter === "all"))) select(shown[0].wo);
-      $(".rec.sel", root)?.scrollIntoView({ block: "nearest" });
+      // Wide: the list has its own scroll box, keep the picked one in view there.
+      // Narrow: the page is the scroll, so don't jump it on every live refresh.
+      if (!narrow.matches) $(".rec.sel", root)?.scrollIntoView({ block: "nearest" });
+      paintPos();
     }
 
+    // Ticked not-started WOs: Move to today (only the ones not already today's), Mark done, Delete.
+    let lastShown = [];
+    const pendingShown = () => lastShown.filter((r) => r.progress === "notStarted");
+    const tickedRecords = () => list.filter((r) => checked.has(r.key));
+    const notToday = (r) => dayLabel(r.day) !== "TODAY";
     function paintMove() {
-      const button = q(".move");
-      button.disabled = !checked.size;
-      button.innerHTML = `${icon("calendar", "sm")}<span>${checked.size ? `Move ${checked.size} to today` : "Tick not-started WOs to move"}</span>`;
-      button.title = "Brings not-started WOs to today: under Today here and at the top of Start's To start list";
+      const ticked = tickedRecords(), movable = ticked.filter(notToday), n = ticked.length;
+      const pending = pendingShown();
+      const allTicked = pending.length > 0 && pending.every((r) => checked.has(r.key));
+      q(".selAll").innerHTML = `${icon("check", "sm")}<span>${allTicked ? "Clear selection" : `Select all pending${pending.length ? ` (${pending.length})` : ""}`}</span>`;
+      q(".selAll").disabled = !pending.length;
+      const move = q(".move");
+      move.classList.toggle("hidden", !movable.length);  // already today's: nothing to move
+      move.innerHTML = `${icon("calendar", "sm")}<span>Move ${movable.length} to today</span>`;
+      move.title = "Brings not-started WOs to today: under Today here and at the top of Start's To start list";
+      q(".done").classList.toggle("hidden", !n);
+      q(".done").innerHTML = `${icon("check", "sm")}<span>Mark ${n} done</span>`;
+      q(".done").title = "Driven / submitted outside the app: marks them started, ended and closed now";
+      q(".del").classList.toggle("hidden", !n);
+      q(".del").innerHTML = `${icon("x", "sm")}<span>Delete ${n}</span>`;
     }
+    q(".selAll").addEventListener("click", () => {
+      const pending = pendingShown();
+      const allTicked = pending.length > 0 && pending.every((r) => checked.has(r.key));
+      if (allTicked) checked.clear(); else pending.forEach((r) => checked.add(r.key));
+      drawList();
+    });
+    async function bulk(action, ask) {
+      const wos = tickedRecords().map((r) => r.wo);
+      if (!wos.length) return;
+      if (ask && !await confirmBox(...ask(wos))) return;
+      // Second check - these can't be undone from the app.
+      const n = wos.length, count = `${n} WO${n > 1 ? "s" : ""}`;
+      if (!await confirmBox("Are you sure?", (action === "delete" ? `Really delete ${count}?` : `Really mark ${count} as done?`) + "\n\n" +
+        (action === "delete" ? "They won't come back in the app by themselves (copies stay in tickets.deleted.json)."
+          : "They'll leave Start, End and Close as done by hand."),
+        action === "delete" ? `Yes, delete ${n}` : `Yes, mark ${n} done`, action === "delete" ? "btnDanger" : "btnPrimary")) return;
+      try {
+        const r = await api("/api/records/bulk", { body: { action, wos } });
+        checked.clear();
+        toast(action === "delete" ? `Deleted ${r.count}. Copies are kept in tickets.deleted.json.` : `Marked ${r.count} done.`, "ok");
+        load(); refreshState();
+      } catch (error) { toast(error.message, "bad"); }
+    }
+    const listWos = (wos) => wos.slice(0, 8).map((w) => `• ${esc(w)}`).join("\n") + (wos.length > 8 ? `\n… and ${wos.length - 8} more` : "");
+    q(".del").addEventListener("click", () => bulk("delete", (wos) => ["Delete these?",
+      `Delete ${wos.length} not-started WO${wos.length > 1 ? "s" : ""}?\n\n${listWos(wos)}\n\nCopies are kept in tickets.deleted.json.`, "Yes, delete", "btnDanger"]));
+    q(".done").addEventListener("click", () => bulk("done", (wos) => ["Mark done?",
+      `Mark ${wos.length} WO${wos.length > 1 ? "s" : ""} as done by hand (started, ended and closed now)?\n\n${listWos(wos)}`, "Mark done", "btnPrimary"]));
 
     q(".recList").addEventListener("click", (e) => {
       const row = e.target.closest(".rec");
@@ -103,6 +198,7 @@ export default {
         return paintMove();
       }
       select(row.dataset.wo);
+      showDetail();
     });
     q(".search").addEventListener("input", debounce(load, 220));
     q(".filters").addEventListener("click", (e) => {
@@ -110,7 +206,7 @@ export default {
       if (b) { filter = b.dataset.f; drawList(); }
     });
     q(".move").addEventListener("click", async () => {
-      const wos = list.filter((r) => checked.has(r.key)).map((r) => r.wo);
+      const wos = tickedRecords().filter(notToday).map((r) => r.wo);
       if (!wos.length) return;
       try {
         const r = await api("/api/records/moveToday", { body: { wos } });
@@ -123,6 +219,7 @@ export default {
       selected = wo;
       detailShown = Boolean(wo);
       $$(".rec", root).forEach((row) => row.classList.toggle("sel", keyOf(row.dataset.wo) === keyOf(wo)));
+      paintPos();
       if (!wo) { q(".detail").innerHTML = `<div class="empty">${icon("records")}<p>Pick a record on the left.</p></div>`; return; }
       try { drawDetail(await api(`/api/records/${enc(wo)}`)); }
       catch (error) { q(".detail").innerHTML = `<div class="empty">${icon("alert")}<p>${esc(error.message)}</p></div>`; }
@@ -149,7 +246,7 @@ export default {
             <button class="btn btnDanger sm del" title="Delete this record">${icon("trash", "sm")}<span>Delete</span></button></div>
           <div class="dMeta">${esc(meta || "Not started yet")}</div>
           <div class="dTags">${typeBadge(r.startType)}${progressBadge(r)}${statusBadge(r.status)}${verified}
-            ${started ? `${waDot(r)}<span class="note">${r.whatsappSentAt ? `shared ${esc(niceTime(r.whatsappSentAt))}` : "not shared yet"}</span>` : ""}</div>
+            ${started && r.startType !== "manual" ? `${waDot(r)}<span class="note">${r.whatsappSentAt ? `shared ${esc(niceTime(r.whatsappSentAt))}` : "not shared yet"}</span>` : ""}</div>
           <div class="dActions">
             <button class="btn btnPrimary cpReport">${icon("copy", "sm")}<span>Copy ${started ? "report" : "preview"}</span></button>
             ${started ? `<button class="btn btnWa share">${icon("whatsapp", "sm")}<span>WhatsApp</span></button>` : ""}
@@ -228,7 +325,7 @@ export default {
       $(".del", d).addEventListener("click", async () => {
         if (!await confirmBox("Delete record?", `Delete the record for\n<b>${esc(r.wo)}</b>?\n\nIts Ticket ID, EQ Job IDs, report and history will be removed from Records.`, "Delete", "btnDanger")) return;
         if (!await confirmBox("Are you sure?", `Really delete <b>${esc(r.wo)}</b>?\n\nA copy is kept in tickets.deleted.json, but it won't come back in the app by itself.`, "Yes, delete", "btnDanger")) return;
-        try { const o = await api(`/api/records/${enc(r.wo)}`, { method: "DELETE" }); toast(o.message, "ok"); selected = null; load(); refreshState(); }
+        try { const o = await api(`/api/records/${enc(r.wo)}`, { method: "DELETE" }); toast(o.message, "ok"); selected = null; showList(); load(); refreshState(); }
         catch (error) { toast(error.message, "bad"); }
       });
 

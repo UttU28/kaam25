@@ -396,6 +396,13 @@ export default {
     paintMode();
     loadWaiting();
     if (params.get("wo")) box.set(params.get("wo"));
+    else {
+      // Nothing carried over: pick the first WO to start (the To start list follows the Maps order).
+      api("/api/start/waiting").then((waiting) => {
+        if (box.get() || busy || !waiting.length) return;
+        box.set(waiting[0].wo);
+      }).catch(() => {});
+    }
     setTimeout(() => box.focus(), 50);
     // ----- live: chips / next local ID / cloud start on every check; lists and the WO when data changes -----
     const offState = store.on(() => { if (!busy) paintMode(false); });

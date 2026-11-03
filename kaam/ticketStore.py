@@ -89,7 +89,7 @@ ticketFields = (
     "ticketId", "startTicketId", "endTicketId", "ticketVerified", "startedAt", "submitted", "driveShift",
     "startType", "localGridNumber",
     "folderName", "endedAt", "eq3", "eq6", "status", "totalGrids", "attempted", "skipped", "remarks",
-    "gridSummaryPath", "whatsappSentAt", "closeStep1At", "closeStep2At", "closeStep3At", "closedAt",
+    "gridSummaryPath", "whatsappSentAt", "closeStep1At", "closeStep2At", "closeStep3At", "closedAt", "speedTests",
 )
 
 
@@ -356,6 +356,45 @@ def renameWo(oldWo, newWo):
         tickets[newKey] = record
         writeFile(tickets)
         return dict(record)
+
+
+def deleteNotStarted(wos):
+    """Delete several not-started WOs in one write (copies go to tickets.deleted.json).
+    Started ones are skipped. Returns how many were deleted."""
+    deleted = 0
+    with storeLock:
+        tickets = readFile()
+        for wo in wos:
+            key = woKey(wo)
+            record = tickets.get(key)
+            if record is None or record.get("startedAt"):
+                continue
+            keepDeletedCopy(tickets.pop(key))
+            deleted += 1
+        if deleted:
+            writeFile(tickets)
+    return deleted
+
+
+def markDone(wos):
+    """Mark not-started WOs as done by hand (driven / submitted outside the app): started, ended and
+    closed now, so they leave Start, End and Close. Started ones are skipped. One write.
+    Returns how many were marked."""
+    marked = 0
+    with storeLock:
+        tickets = readFile()
+        stamp = now()
+        for wo in wos:
+            record = tickets.get(woKey(wo))
+            if record is None or record.get("startedAt"):
+                continue
+            record.update(startedAt=stamp, endedAt=stamp, closedAt=stamp, startType="manual", updatedAt=stamp)
+            record.setdefault("history", []).append({"at": stamp, "event": "Marked done by hand (Records)"})
+            record["history"] = record["history"][-maxHistory:]
+            marked += 1
+        if marked:
+            writeFile(tickets)
+    return marked
 
 
 def moveToToday(wos):

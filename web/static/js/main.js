@@ -8,15 +8,19 @@ import close from "./pages/close.js";
 import records from "./pages/records.js";
 import settings from "./pages/settings.js";
 import maps from "./pages/maps.js";
+import sheets from "./pages/sheets.js";
+import live from "./pages/live.js";
 
-const pages = { today, maps, start, end, close, records, settings };
+const pages = { today, maps, sheets, live, start, end, close, records, settings };
 const navItems = [
   ["Work", null],
   ["today", "Today", "today", "var(--accent)"],
-  ["maps", "Maps", "map", "var(--green)"],
   ["start", "Start Ticket", "rocket", "var(--accent)", "toStart"],
+  ["live", "Live Testing", "gauge", "var(--green)"],
   ["end", "End Ticket", "end", "var(--green)", "open"],
   ["close", "Close Ticket", "lock", "var(--amber)", "readyToClose"],
+  ["maps", "Maps", "map", "var(--green)"],
+  ["sheets", "Sheets", "sheet", "var(--accent)"],
   ["Library", null],
   ["records", "Records", "records", "var(--purple)"],
   ["settings", "Settings", "settings", "var(--muted)"],
@@ -28,7 +32,7 @@ function renderNav() {
   const counts = store.state?.counts || {};
   $("#nav").innerHTML = navItems.map(([key, label, ico, color, countKey]) => label === null
     ? `<div class="navSection">${key}</div>`
-    : `<a href="#/${key}" data-page="${key}" class="${key === currentName ? "active" : ""}" style="--navColor:${color}">
+    : `<a href="#/${key}" data-page="${key}" title="${label}" class="${key === currentName ? "active" : ""}" style="--navColor:${color}">
          ${icon(ico)}<span>${label}</span>${countKey && counts[countKey] ? `<span class="count ${key === "end" ? "hot" : ""}">${counts[countKey]}</span>` : ""}</a>`).join("");
 }
 
@@ -41,8 +45,8 @@ function renderFoot() {
   const text = !b.running ? "Chrome bridge off" : fresh ? "Chrome connected" : "Waiting for Chrome";
   $("#sidebarFoot").innerHTML = `
     <a class="footRow" href="#/settings" title="${esc(b.error || `Last check-in ${ago(b.lastContactAt)}`)}"><span class="dot ${dot}"></span><span>${text}</span></a>
-    <div class="footRow">${icon("clock", "sm")}<span>Shift <b>${esc(s.shift)}</b> · PM from ${esc(s.pmFrom)}</span></div>
-    <div class="footRow">${icon("key", "sm")}<span>Team <b>${esc(s.employeeId)}</b></span></div>`;
+    <div class="footRow" title="Shift ${esc(s.shift)} · PM from ${esc(s.pmFrom)}">${icon("clock", "sm")}<span>Shift <b>${esc(s.shift)}</b> · PM from ${esc(s.pmFrom)}</span></div>
+    <div class="footRow" title="Team ${esc(s.employeeId)}">${icon("key", "sm")}<span>Team <b>${esc(s.employeeId)}</b></span></div>`;
 }
 
 function renderJobsPill() {
@@ -124,6 +128,9 @@ async function boot() {
   hydrateIcons();
   $("#menuBtn").innerHTML = icon("menu");
   $("#menuBtn").addEventListener("click", () => $("#sidebar").classList.toggle("open"));
+  // Narrow window: the menu slides over the page; a tap outside it (or Esc) closes it.
+  $("#navScrim").addEventListener("click", () => $("#sidebar").classList.remove("open"));
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") $("#sidebar").classList.remove("open"); });
   $("#searchTrigger").addEventListener("click", openPalette);
   $("#jobsPill").addEventListener("click", () => { location.hash = "#/today"; });
   document.addEventListener("keydown", (e) => {
@@ -140,6 +147,9 @@ async function boot() {
   }
   store.on(() => { renderNav(); renderFoot(); renderJobsPill(); });
   await refreshState();
+  // The app was restarted (new code): reload so this tab doesn't keep running the old pages.
+  const bootedAt = store.state?.bootedAt;
+  store.on((s) => { if (bootedAt && s?.bootedAt && s.bootedAt !== bootedAt) location.reload(); });
   window.addEventListener("hashchange", route);
   route();
   startLiveUpdates();

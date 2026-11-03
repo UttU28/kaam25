@@ -62,6 +62,9 @@ fields = [
     # ---------- Chrome ----------
     ("CHROME_PATHS", "Chrome", "chrome.exe paths", "text", "First one that exists is used. Separate with ;", {}),
     ("CHROME_USER_DATA_DIR", "Chrome", "Chrome user data folder", "dir", "Used to find your last-used Chrome profile.", {}),
+    ("LAN_ACCESS", "Chrome", "Open on WiFi", "bool",
+     "On: other devices on the same WiFi can open the app at http://<this PC's IP>:<port>. Anyone on that network can then use it, so turn it off on public WiFi.",
+     {"optional": True, "default": "true"}),
     ("BRIDGE_PORT", "Chrome", "Extension port", "readonly", "Also set in the Chrome extension, so change it only in .env and the extension together.", {}),
 ]
 fieldsByKey = {f[0]: f for f in fields}

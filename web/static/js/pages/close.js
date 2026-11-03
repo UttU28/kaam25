@@ -110,6 +110,13 @@ export default {
     paint("");
     loadReady();
     if (params.get("wo")) box.set(params.get("wo"));
+    else {
+      // Nothing carried over: pick the ready-to-close WO started first (we close in the order we started).
+      api("/api/close/ready").then((ready) => {
+        if (box.get() || !ready.length) return;
+        box.set(ready.slice().sort((a, b) => (a.startedAt || "").localeCompare(b.startedAt || ""))[0].wo);
+      }).catch(() => {});
+    }
     setTimeout(() => box.focus(), 50);
     // ----- live: list, count and the picked ticket's steps when data changes -----
     const offData = onDataChange(async () => {

@@ -27,5 +27,3 @@ __pycache__/
 Thumbs.db
 desktop.ini
 
-# Route map with WO locations (work data)
-ticket_route_map.html

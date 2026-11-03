@@ -408,15 +408,17 @@ def shareTicket(wo, report, send=None, csvPath=None, progress=lambda text: None)
 
 # ---------- Apeksha ----------
 def sendLocation(wo):
-    """Send just "lat long" of the WO to Apeksha."""
+    """Send the WO's location to Apeksha: the preview (as the location card shows it), then the
+    Google Maps link on the next line."""
     record = getRecord(cleanWorkOrder(wo)) or {}
     lat, lon = latLong(record)
     if not (lat and lon):
         raise WorkflowError("No location saved for this WO, nothing to send.")
-    reply = shareLocation(lat, lon)
+    preview = f"WO: {record.get('wo') or cleanWorkOrder(wo)}\nGrid Key: {record.get('gridKey') or ''}\nLocation: {lat}, {lon}"
+    reply = shareLocation(lat, lon, preview=preview)
     if reply.get("duplicate"):
         return f"Location {lat} {lon} is already the newest on Apeksha - nothing new saved."
-    return f"Sent {lat} {lon} to Apeksha" + (" as a Maps link ✓" if reply.get("mapsLink") else " ✓")
+    return f"Sent to Apeksha: the preview, then the Maps link ({lat}, {lon}) ✓"
 
 
 # ---------- Close ----------

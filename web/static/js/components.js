@@ -158,7 +158,7 @@ export function locationCard(title = "WO · Grid Key · Location") {
   const el = h(`<div class="card loc">
       <div class="cardHead"><h2>${esc(title)}</h2>
         <div class="actions">
-          <button class="btn btnGhost sm send" title="Send just the coordinates to Apeksha">${icon("navigate", "sm")}<span>Send</span></button>
+          <button class="btn btnGhost sm send" title="Send the preview and a Maps link to Apeksha">${icon("navigate", "sm")}<span>Send</span></button>
           <button class="btn btnGhost sm copy" title="Copy all of it">${icon("copy", "sm")}<span>Copy</span></button>
         </div></div>
       <div class="cardBody"><pre class="pre"></pre><div class="note locNote" style="margin-top:8px"></div></div>
@@ -185,7 +185,7 @@ export function locationCard(title = "WO · Grid Key · Location") {
     hasLocation = Boolean(lat && lon);
     pre.textContent = `WO: ${wo}\nGrid Key: ${record?.gridKey || ""}\nLocation: ${lat || lon ? `${lat}, ${lon}` : ""}`;
     send.disabled = !hasLocation;
-    send.title = hasLocation ? `Send "${lat} ${lon}" to Apeksha` : "No location saved for this WO";
+    send.title = hasLocation ? `Send the preview and a Maps link for ${lat}, ${lon} to Apeksha` : "No location saved for this WO";
   }
   show("", null);
   return { el, show };
@@ -258,6 +258,7 @@ export function statusBadge(status) {
 export function typeBadge(startType) {
   if (startType === "cloud") return `<span class="badge bBlue">${icon("cloud", "sm")}Cloud</span>`;
   if (startType === "local") return `<span class="badge bPurple">${icon("laptop", "sm")}Local</span>`;
+  if (startType === "manual") return `<span class="badge bGrey">${icon("check", "sm")}Done by hand</span>`;
   return "";
 }
 export const waDot = (record) =>

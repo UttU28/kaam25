@@ -12,7 +12,7 @@ const CATS = [
   { key: "missed", label: "Not driven (on that day's list)", color: "var(--red)", on: true, past: true },
 ];
 const DRIVEN = new Set(["completed", "doing"]), PLANNED = new Set(["pending"]);
-const FILTER_KEY = "kaamMapFilter", FROM_ME_KEY = "kaamMapFromMe", OPEN_KEY = "kaamMapFilterOpen";
+const FILTER_KEY = "kaamMapFilter", OPEN_KEY = "kaamMapFilterOpen";
 const MAX_ACC = 1500;     // metres; worse is an internet-address guess, not a position
 const EXACT_MAX = 15;     // up to this many stops the order is provably the shortest
 const OSRM = "https://router.project-osrm.org";
@@ -161,9 +161,8 @@ export default {
 function mountMap(L, root, mapEl) {
   let filter = Object.fromEntries(CATS.map((c) => [c.key, c.on]));
   try { Object.assign(filter, JSON.parse(lsGet(FILTER_KEY) || "{}")); } catch { /* ignore */ }
-  let fromMe = lsGet(FROM_ME_KEY) === "1";
   let day = null, data = null, points = [], markers = {};
-  let me = null, meMarker = null, meCircle = null, startPoint = null;
+  let me = null, meMarker = null, meCircle = null;
   let tsp = { signature: null, keys: [], exact: true, road: true, busy: false };
   const legs = { driven: { key: null, layers: [], info: null }, plan: { key: null, layers: [], info: null } };
   const routeCache = new Map();
@@ -190,8 +189,7 @@ function mountMap(L, root, mapEl) {
           ${CATS.map((c) => `<label class="mfRow" data-row="${c.key}"><input type="checkbox" data-cat="${c.key}" ${filter[c.key] ? "checked" : ""}>
             <span class="mfDot" style="background:${c.color}"></span><span class="mfLabel" data-label="${c.key}">${c.label}</span><b data-count="${c.key}">0</b></label>`).join("")}
           <div class="mfSep" data-today></div>
-          <label class="mfRow" data-today><input type="checkbox" data-fromme ${fromMe ? "checked" : ""}>
-            <span class="mfDot me"></span><span class="mfLabel">Start plan from my location<small data-mestate></small></span></label>
+          <div class="mfRow" data-today><span class="mfDot me"></span><span class="mfLabel">Your location<small data-mestate></small></span></div>
         </div>`;
       box.querySelector(".mfHead").onclick = () => {
         const body = box.querySelector(".mfBody");
@@ -203,11 +201,6 @@ function mountMap(L, root, mapEl) {
         lsSet(FILTER_KEY, JSON.stringify(filter));
         paint();
       });
-      box.querySelector("[data-fromme]").onchange = (e) => {
-        fromMe = e.target.checked;
-        lsSet(FROM_ME_KEY, fromMe ? "1" : "0");
-        paint();
-      };
       L.DomEvent.disableClickPropagation(box);
       L.DomEvent.disableScrollPropagation(box);
       return box;
@@ -243,9 +236,7 @@ function mountMap(L, root, mapEl) {
   // ----- your location -----
   const meIcon = L.divIcon({ className: "", html: '<div class="meDot"></div>', iconSize: [18, 18], iconAnchor: [9, 9] });
   function setMe(lat, lon, acc, manual) {
-    me = { lat, lon, acc, manual };
-    const moved = !startPoint || haversineM(startPoint, me) > 1000;
-    if (manual || !startPoint || (moved && Date.now() - (tsp.at || 0) > 60000)) startPoint = { lat, lon };
+    me = { lat, lon, acc, manual };  // only moves your dot: the plan changes only on "From my location"
     if (!meMarker) {
       meMarker = L.marker([lat, lon], { icon: meIcon, zIndexOffset: 1000 }).addTo(map).bindPopup("");
       meCircle = L.circle([lat, lon], { radius: Math.max(acc, 1), color: "#e3a63d", weight: 1, fillOpacity: .08, interactive: false }).addTo(map);
@@ -255,7 +246,6 @@ function mountMap(L, root, mapEl) {
     }
     meMarker.setPopupContent(manual ? "Your spot (set by hand)" : `You (GPS ±${Math.round(acc)} m)`);
     showMeState();
-    paint();
   }
   function showMeState(text) {
     const el = filterBox.querySelector("[data-mestate]");
@@ -282,13 +272,13 @@ function mountMap(L, root, mapEl) {
   const visiblePoints = () => points.filter((p) => filter[p.category] && applies(catOf(p.category)));
   const drivenStart = (p) => p.drivenAt || "";
 
-  // Where the plan starts: the WO you're on now (drawn - it's stop 1), else you (if asked, drawn),
-  // else where you finished your last WO (only used to plan from, not drawn), else anywhere.
+  // Where the plan starts: the WO you're on now (drawn - it's stop 1), else where you finished your
+  // last WO (only used to plan from, not drawn), else anywhere. Your location is used only when you
+  // press "From my location" (that order is then saved as yours).
   function planStart(done, doing) {
     if (!isToday()) return null;
     const now = doing[doing.length - 1];
     if (now) return { lat: now.lat, lon: now.lon, key: now.key, doing: true };
-    if (fromMe && startPoint) return { lat: startPoint.lat, lon: startPoint.lon, me: true };
     const last = done[done.length - 1];
     return last ? { lat: last.lat, lon: last.lon, key: last.key, hidden: true } : null;
   }
@@ -370,7 +360,6 @@ function mountMap(L, root, mapEl) {
 
   function fitVisible() {
     const pts = visiblePoints().map((p) => [p.lat, p.lon]);
-    if (isToday() && fromMe && startPoint) pts.push([startPoint.lat, startPoint.lon]);
     if (pts.length) map.fitBounds(L.latLngBounds(pts), { padding: [50, 50], maxZoom: 14 });
   }
 
@@ -408,7 +397,14 @@ function mountMap(L, root, mapEl) {
     const signature = planSignature(plannedAll, start);
     if (tsp.busy === signature) return;
     tsp.busy = signature;
-    const nodes = start ? [start, ...plannedAll] : plannedAll.slice();
+    const result = await shortestOrder(plannedAll, start);
+    if (!alive || tsp.busy !== signature) return;
+    tsp = { signature, ...result, busy: false, at: Date.now() };
+    paint();
+  }
+  // Shortest drive through `stops` from `start` (road distances, straight-line if the road service is down).
+  async function shortestOrder(stops, start) {
+    const nodes = start ? [start, ...stops] : stops.slice();
     let D, road = true;
     if (nodes.length > 1) {
       try {
@@ -420,11 +416,32 @@ function mountMap(L, root, mapEl) {
         D = nodes.map((a) => nodes.map((b) => haversineM(a, b)));
       }
     } else D = [[0]];
-    if (!alive || tsp.busy !== signature) return;
     const { order, exact } = solveOrder(D, Boolean(start));
     const keys = order.map((i) => nodes[i]).filter((p) => !start || p !== start).map((p) => p.key);
-    tsp = { signature, keys, exact, road, busy: false, at: Date.now() };
-    paint();
+    return { keys, exact, road };
+  }
+
+  // "From my location": once, the shortest order from where you are (or from the WO you're on),
+  // saved as your order - drag to adjust it; it doesn't change again until you press the button again.
+  let ordering = false;
+  async function orderFromMe() {
+    if (ordering || !seq) return;
+    if (!me) { toast("Waiting for your location - allow location access, or use 📍 Set my spot on the map first.", "warn", 5000); return; }
+    const stops = seq.plannedAll;
+    if (!stops.length) { toast("Nothing left to drive today.", "warn"); return; }
+    ordering = true;
+    renderList();
+    try {
+      const now = seq.doing[seq.doing.length - 1];
+      const start = now ? { lat: now.lat, lon: now.lon, key: now.key } : { lat: me.lat, lon: me.lon, me: true };
+      const { keys } = await shortestOrder(stops, start);
+      if (!alive) return;
+      const hidden = (data.savedOrder || tsp.keys).filter((k) => !keys.includes(k));  // stops the filter hides
+      await saveOrder([...keys, ...hidden], now ? "Ordered from the WO you're on - saved. Drag to adjust." : "Ordered from your location - saved. Drag to adjust.");
+    } finally {
+      ordering = false;
+      renderList();
+    }
   }
 
   // ----- paint everything -----
@@ -500,7 +517,7 @@ function mountMap(L, root, mapEl) {
     const lines = [];
     if (isToday() && route.length) {
       const how = mode === "custom" ? "your order" : mode === "shortest" ? (tsp.exact ? "shortest order" : "near-shortest order") : "working out the shortest order…";
-      const from = start?.doing ? "from the WO you're on" : start?.me ? "from your location" : start ? "from where you finished last" : "";
+      const from = mode === "custom" ? "" : start?.doing ? "from the WO you're on" : start?.me ? "from your location" : start ? "from where you finished last" : "";
       lines.push(`<div class="rsLine"><span class="rsDot" style="background:#7aa2ff"></span><div>
         <b>To drive${p ? ` · ${miles(p.distance)} mi · ${duration(p.duration)}` : ""}</b><small>${route.length} stop${route.length > 1 ? "s" : ""} · ${how}${from ? " · " + from : ""}${mode === "shortest" && !tsp.road ? " · straight-line (road service unavailable)" : ""}</small></div></div>`);
     }
@@ -535,8 +552,8 @@ function mountMap(L, root, mapEl) {
     if (isToday() && route.length) {
       html += `<div class="slHead"><span>To drive</span>
         <small>${mode === "custom" ? `<span class="slTag">Your order · saved</span>` : mode === "shortest" ? "shortest order" : "planning…"}</small>
+        <button class="btn btnGhost sm slReset" data-fromme ${ordering ? "disabled" : ""} title="Shortest order from where you are now - once; then drag to adjust">${icon("navigate", "sm")}${ordering ? "Working it out…" : "From my location"}</button>
         ${mode === "custom" ? `<button class="btn btnGhost sm slReset" data-reset>${icon("route", "sm")}Shortest</button>` : ""}</div>`;
-      if (start?.me) html += `<div class="stopRow start"><span class="mk me">▶</span><div class="srBody"><div class="srWo">Your location</div><div class="srMeta">start of the plan</div></div></div>`;
       html += doing.map((p, i) => rowHtml(p, i + 1, false)).join("");
       html += planned.map((p, i) => rowHtml(p, doing.length + i + 1, true)).join("");
       if (planned.length > 1) html += `<div class="slHint">Drag ⋮⋮ to change the order - it's saved for ${esc(dayName(day))}.</div>`;
@@ -553,11 +570,12 @@ function mountMap(L, root, mapEl) {
     if (!html) html = `<div class="empty">${icon("map")}<p>${points.length ? "Everything is hidden by the filter." : `No WOs on ${esc(dayName(day))}.`}</p></div>`;
     list.innerHTML = html;
     list.querySelector("[data-reset]")?.addEventListener("click", () => saveOrder(null));
+    list.querySelector("[data-fromme]")?.addEventListener("click", () => orderFromMe());
   }
 
   // click a row: show it on the map
   $("#stopList", root).addEventListener("click", (e) => {
-    if (e.target.closest(".srNav, [data-reset]")) return;
+    if (e.target.closest(".srNav, [data-reset], [data-fromme]")) return;
     const row = e.target.closest(".stopRow[data-key]");
     const m = row && markers[row.dataset.key];
     if (m) { map.setView(m.getLatLng(), Math.max(map.getZoom(), 13)); m.openPopup(); }
@@ -606,13 +624,13 @@ function mountMap(L, root, mapEl) {
     if (renderPending) renderList();
   });
 
-  async function saveOrder(keys) {
+  async function saveOrder(keys, message) {
     const before = data.savedOrder;
     data.savedOrder = keys;
     paint();
     try {
       await api("/api/map/order", { body: { date: day, keys: keys || [] } });
-      toast(keys ? "Order saved." : "Back to the shortest order.", "ok", 2200);
+      toast(message || (keys ? "Order saved." : "Back to the shortest order."), "ok", message ? 3500 : 2200);
     } catch (error) {
       data.savedOrder = before;
       paint();

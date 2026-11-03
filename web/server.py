@@ -1,7 +1,7 @@
 """Kaam25 web app: a JSON API over kaam/ plus the single-page UI in web/static.
 
 Run:  runWeb.bat   (or: venv\\Scripts\\python -m web.server)
-Opens on http://127.0.0.1:5000 (or the next free port). Local only - it drives your Chrome.
+Opens on http://127.0.0.1:5000 (or the next free port). Also reachable from the same WiFi at http://<this PC's IP>:<port> while LAN_ACCESS is on (default).
 """
 
 import os
@@ -25,8 +25,8 @@ from kaam.gridSummary import buildFolderName, showInExplorer  # noqa: E402
 from kaam.sheetImport import SheetImportError  # noqa: E402
 from kaam.temsParagon import actions as temsActions, runTems  # noqa: E402
 from kaam.ticketLookup import currentDriveShift  # noqa: E402
-from kaam.ticketStore import (TicketStoreError, cloudStartToday, deleteRecord, fileStamp, getRecord,  # noqa: E402
-                              isLocalStart, localTicketId, moveToToday, nextLocalNumber, notStartedRecords,
+from kaam.ticketStore import (TicketStoreError, cloudStartToday, deleteNotStarted, deleteRecord, fileStamp,  # noqa: E402
+                              getRecord, isLocalStart, localTicketId, markDone, moveToToday, nextLocalNumber, notStartedRecords,
                               openTicketsToday, renameWo, searchRecords, woKey)
 from kaam.workflows import WorkflowError  # noqa: E402
 
@@ -174,7 +174,8 @@ def state():
             "completedToday": sum(1 for r in todays if r.get("endedAt")),
             "toStart": len(notStartedRecords()),
             "readyToClose": sum(1 for r in records if workflows.isReadyToClose(r)),
-            "whatsappPending": sum(1 for r in todays if r.get("endedAt") and not r.get("whatsappSentAt")),
+            "whatsappPending": sum(1 for r in todays if r.get("endedAt") and not r.get("whatsappSentAt")
+                                   and r.get("startType") != "manual"),
             "total": len(records),
         },
         "today": [summary(r) for r in sorted(todays, key=lambda r: r.get("startedAt") or r.get("updatedAt") or "")],
@@ -207,6 +208,51 @@ def readRouteOrders():
         return {}
 
 
+def wosForDay(dayText, records=None):
+    """A day's WOs, as the Maps and Sheets pages show them: {key: (record, category)}.
+    Driven that day (started or ended then): completed / doing. The rest of that day's list
+    (Records' day, plus Start's To start list today): pending today, missed on a past day."""
+    isToday = dayText == datetime.now().date().isoformat()
+    records = searchRecords("") if records is None else records
+    picked = {}
+    for record in records:
+        started = (record.get("startedAt") or "").startswith(dayText)
+        ended = (record.get("endedAt") or "").startswith(dayText)
+        if started or ended:
+            picked[woKey(record.get("wo"))] = (record, "completed" if record.get("endedAt") else "doing")
+    for record in records:  # the day's list, as in Records (imported / moved / created that day)
+        key = woKey(record.get("wo"))
+        if key not in picked and not record.get("startedAt") and (recordDay(record) or "").startswith(dayText):
+            picked[key] = (record, "pending" if isToday else "missed")
+    if isToday:  # plus everything on Start's To start list (imported or moved to today)
+        for record in notStartedRecords():
+            picked.setdefault(woKey(record.get("wo")), (record, "pending"))
+    return picked
+
+
+@app.get("/api/sheets")
+def sheetRows():
+    """Today's WOs for the Sheets page: WO, grid key, long, lat (as saved, in the right order).
+    Same WOs as today's map. Order: driven ones first (in the order you drove them), then the rest
+    exactly as Start's To start list shows them - which follows the order picked on Maps."""
+    picked = wosForDay(datetime.now().date().isoformat())
+    driven = sorted((r for r, category in picked.values() if category in ("completed", "doing")),
+                    key=lambda r: r.get("startedAt") or r.get("endedAt") or "")
+    startOrder, _ = inMapOrder(notStartedRecords())
+    ordered, seen = [], set()
+    for record in driven + startOrder + [r for r, _ in picked.values()]:
+        key = woKey(record.get("wo"))
+        if key in picked and key not in seen:
+            seen.add(key)
+            ordered.append(picked[key])
+    rows = []
+    for record, category in ordered:
+        lat, lon = workflows.latLong(record)
+        rows.append({"wo": record.get("wo") or "", "gridKey": record.get("gridKey") or "",
+                     "long": lon, "lat": lat, "category": category})
+    return jsonify({"date": datetime.now().date().isoformat(), "rows": rows})
+
+
 @app.get("/api/map")
 def mapPoints():
     """One day's WOs with coordinates for the Maps page (?date=YYYY-MM-DD, default today).
@@ -222,23 +268,12 @@ def mapPoints():
     dayText = day.isoformat()
     isToday = day == today
     records = searchRecords("")
-
-    picked, days = {}, {today.isoformat()}
+    days = {today.isoformat()}
     for record in records:
         for field in ("startedAt", "endedAt"):
             if len(record.get(field) or "") >= 10:
                 days.add(record[field][:10])
-        started = (record.get("startedAt") or "").startswith(dayText)
-        ended = (record.get("endedAt") or "").startswith(dayText)
-        if started or ended:
-            picked[woKey(record.get("wo"))] = (record, "completed" if record.get("endedAt") else "doing")
-    for record in records:  # the day's list, as in Records (imported / moved / created that day)
-        key = woKey(record.get("wo"))
-        if key not in picked and not record.get("startedAt") and (recordDay(record) or "").startswith(dayText):
-            picked[key] = (record, "pending" if isToday else "missed")
-    if isToday:  # plus everything on Start's To start list (imported or moved to today)
-        for record in notStartedRecords():
-            picked.setdefault(woKey(record.get("wo")), (record, "pending"))
+    picked = wosForDay(dayText, records)
 
     points, noLocation = [], []
     for record, category in picked.values():
@@ -476,6 +511,18 @@ def recordsMoveToday():
     return jsonify({"moved": moved})
 
 
+@app.post("/api/records/bulk")
+def recordsBulk():
+    """Records' ticked not-started WOs: {"action": "delete" | "done", "wos": [...]}. Started ones are skipped."""
+    data = body()
+    wos = data.get("wos") or []
+    if data.get("action") == "delete":
+        return jsonify({"count": deleteNotStarted(wos)})
+    if data.get("action") == "done":
+        return jsonify({"count": markDone(wos)})
+    return fail("Unknown action.")
+
+
 @app.post("/api/records/rename")
 def recordsRename():
     """Correct a WO's name (Start's "WO not in TEMS" popup). Not in Records yet: nothing to rename."""
@@ -686,6 +733,144 @@ def tems():
     return jsonify({"job": job.toJson()})
 
 
+# ---------- Live Testing (phones over adb, Vysor windows) ----------
+liveActions = {
+    "desk": "Set up desk",
+    "fullTestAll": "Test all, one by one",
+    "fullTest": "Full test",
+    "speedtest": "Speed test",
+    "airplane": "Airplane toggle",
+}
+
+
+@app.get("/api/live/phones")
+def livePhones():
+    from kaam import phoneControl
+    try:
+        connected = set(phoneControl.connectedSerials())
+        adbError = ""
+    except Exception as error:
+        connected, adbError = set(), str(error)
+    def check(phone):
+        """Live state of one phone (runs for both phones at once)."""
+        serial = phone["serial"]
+        try:
+            onScreen = [c for c, _ in phoneControl.resumedActivities(serial)]
+            phone["testScreen"] = any("ServiceMode" in c for c in onScreen) and any("chrome" in c for c in onScreen)
+            phone["airplane"] = phoneControl.isAirplaneOn(serial)
+            phone["locked"] = "isKeyguardShowing=true" in phoneControl.adbShell(
+                serial, "dumpsys window | grep -m1 isKeyguardShowing")
+            phone["network"] = phoneControl.readNetwork(serial)
+            phone["networkText"] = phoneControl.networkText(phone["network"])
+        except Exception as error:
+            phone["error"] = str(error)
+
+    phones = [{"name": name, "serial": serial, "connected": serial in connected, "airplane": None,
+               "testScreen": False, "locked": False, "network": None, "networkText": ""}
+              for name, serial in phoneControl.configuredPhones().items()]
+    threads = [threading.Thread(target=check, args=(p,)) for p in phones if p["connected"]]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=20)
+    return jsonify({"phones": phones, "adbError": adbError, "splitRatio": phoneControl.splitRatio,
+                    "airplaneSeconds": phoneControl.airplaneSeconds,
+                    "unconfigured": sorted(connected - {p["serial"] for p in phones})})
+
+
+def speedResultText(result):
+    from kaam.phoneControl import networkText
+    network = result.get("network")
+    tech = network.get("tech") if network else ""
+    if result.get("error"):
+        return f"{result['phone']} ({tech or '?'}): no speed - {result['error']}"
+    return (f"{result['phone']} ({tech or '?'}): {result.get('download') or '?'} Mbps down, ping {result.get('ping') or '?'} ms"
+            + (f" ({result['pingLoaded']} ms loaded)" if result.get("pingLoaded") else "")
+            + (f" · {networkText(network)}" if network else ""))
+
+
+def saveSpeedTest(wo, result):
+    """Adds one speed test result to the WO's record (its speedTests list)."""
+    record = getRecord(wo) or {}
+    tests = list(record.get("speedTests") or [])
+    tests.append({"phone": result.get("phone"), "download": result.get("download"), "ping": result.get("ping"),
+                  "pingLoaded": result.get("pingLoaded"), "resultId": result.get("resultId"),
+                  "network": result.get("network"), "error": result.get("error"),
+                  "at": datetime.now().isoformat(timespec="seconds")})
+    return workflows.safeSave(wo, event=f"Speed test {speedResultText(result)}", speedTests=tests)
+
+
+@app.post("/api/live/tests/remove")
+def liveTestRemove():
+    data = body()
+    wo = workflows.cleanWorkOrder(data.get("wo", ""))
+    record = requireRecord(wo)
+    tests = [t for t in record.get("speedTests") or [] if t.get("resultId") != data.get("resultId")]
+    workflows.safeSave(record["wo"], speedTests=tests)
+    return jsonify({"speedTests": tests})
+
+
+@app.post("/api/live/run")
+def liveRun():
+    from kaam import phoneControl
+    from kaam.chromeBridge import raiseIfStopped
+    data = body()
+    action, phone = data.get("action", ""), (data.get("phone") or "").strip()
+    wo = workflows.cleanWorkOrder(data.get("wo", ""))
+    if action not in liveActions:
+        return fail(f"Unknown action {action}.")
+    if action not in ("desk", "fullTestAll") and not phone:
+        return fail("Pick a phone.")
+    missingWo = wo if wo and not getRecord(wo) else ""
+    if missingWo:
+        wo = ""  # still test; the result just isn't saved anywhere
+    resultText = speedResultText
+
+    def keep(job, result):
+        """Shows the result on the page at once and saves it on the WO."""
+        job.post("results", (job.data.get("results") or []) + [result])
+        if wo:
+            problem = saveSpeedTest(wo, result)
+            job.progress(problem or f"Saved on {wo}")
+
+    def work(job):
+        phoneControl.listenHere(job.progress)
+        phoneControl.stopCheck = raiseIfStopped
+        if missingWo:
+            job.progress(f"{missingWo} isn't in Records - testing anyway, results won't be saved on a WO")
+        try:
+            if action == "desk":
+                from kaam.deskLayout import setupDesk
+                setupDesk()
+                return "Desk ready: phones set up, Chrome on the left, phones on the right."
+            if action == "fullTestAll":
+                connected = set(phoneControl.connectedSerials())
+                serials = [s for s in phoneControl.configuredPhones().values() if s in connected]
+                if not serials:
+                    raise RuntimeError("No phone from PHONES in .env is connected.")
+                # one at a time (NR phones first, then LTE): two speed tests must not share the network
+                results = phoneControl.fullTestOneByOne(serials, onResult=lambda r: keep(job, r),
+                                                        onOrder=lambda names: job.post("order", names))
+                return {"summary": " · ".join(resultText(r) for r in results), "results": results}
+            serial = phoneControl.pickPhones([phone])[0]
+            if action == "airplane":  # just re-attach to the network; no test, nothing saved
+                if phoneControl.toggleAirplane(serial):
+                    return f"{phone}: airplane mode toggled, back online."
+                return {"ok": False, "summary": f"{phone}: airplane mode toggled, but no internet yet."}
+            result = phoneControl.speedTest(serial) if action == "speedtest" else phoneControl.fullTest(serial)
+            keep(job, result)
+            return {"summary": resultText(result), "results": [result]}
+        finally:
+            phoneControl.listenHere(None)
+
+    running = next((j for j in listJobs() if j["kind"] == "live" and j["state"] == "running"), None)
+    if running:  # one at a time: tests share the network, and Set up desk moves the same phones
+        return fail(f"Wait for \"{running['title']}\" to finish (or press Stop).")
+    title = liveActions[action] + (f" · {phone}" if action in ("fullTest", "speedtest", "airplane") else "")
+    job = startJob("live", phone or action, title, work)
+    return jsonify({"job": job.toJson()})
+
+
 # ---------- jobs ----------
 @app.get("/api/jobs")
 def jobsList():
@@ -721,10 +906,31 @@ def isPortFree(port):
         if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
             probe.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
         try:
-            probe.bind(("127.0.0.1", port))
+            probe.bind((bindHost(), port))
             return True
         except OSError:
             return False
+
+
+def bindHost():
+    """All network cards (so the WiFi can reach it) when LAN_ACCESS is on, else this PC only."""
+    return "0.0.0.0" if config.lanAccess else "127.0.0.1"
+
+
+def lanAddresses():
+    """This PC's WiFi/LAN IPv4 addresses, for the startup message."""
+    found = set()
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.connect(("10.255.255.255", 1))  # no packet is sent; just picks the outgoing card
+            found.add(probe.getsockname()[0])
+    except OSError:
+        pass
+    try:
+        found.update(info[4][0] for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET))
+    except OSError:
+        pass
+    return sorted(ip for ip in found if not ip.startswith(("127.", "169.254.")))
 
 
 def pickPort(preferred=5000):
@@ -819,9 +1025,12 @@ def main():
         print(f"! Chrome bridge not started: {error}")
     url = f"http://127.0.0.1:{port}"
     print(f"Kaam25 web is running on {url}  (Ctrl+C to stop)")
+    if config.lanAccess:
+        for ip in lanAddresses():
+            print(f"  On the same WiFi: http://{ip}:{port}")
     if "--no-browser" not in sys.argv and not afterRestart:
         threading.Timer(1.0, lambda: showApp(url)).start()
-    app.run(host="127.0.0.1", port=port, threaded=True, use_reloader=False, debug=False)
+    app.run(host=bindHost(), port=port, threaded=True, use_reloader=False, debug=False)
 
 
 if __name__ == "__main__":
