@@ -1,7 +1,7 @@
 // Records: everything saved in tickets.json - search, filter, edit status (saves as you change it),
 // share, move to today, delete.
 import { $, $$, api, clock, confirmBox, copyWithFlash, dayLabel, debounce, enc, esc, flash, icon, isToday, niceTime, onDataChange, refreshState, store, toast } from "../core.js";
-import { jobPanel, progressBadge, seg, statusBadge, typeBadge, waDot } from "../components.js";
+import { jobPanel, locationTarget, progressBadge, seg, shareLocation, statusBadge, typeBadge, waDot } from "../components.js";
 
 const filters = [
   ["all", "All"], ["today", "Today"], ["inProgress", "In progress"], ["completed", "Completed"], ["notStarted", "Not started"],
@@ -40,6 +40,7 @@ export default {
         <div class="bulkBar">
           <button class="btn btnGhost selAll">${icon("check", "sm")}<span>Select all pending</span></button>
           <button class="btn btnPurple move hidden">${icon("calendar", "sm")}<span>Move to today</span></button>
+          <button class="btn btnPurple moveTomorrow hidden">${icon("calendar", "sm")}<span>Move to tomorrow</span></button>
           <button class="btn btnGhost done hidden">${icon("check", "sm")}<span>Mark done</span></button>
           <button class="btn btnDanger del hidden">${icon("x", "sm")}<span>Delete</span></button>
         </div>
@@ -155,6 +156,12 @@ export default {
       move.classList.toggle("hidden", !movable.length);  // already today's: nothing to move
       move.innerHTML = `${icon("calendar", "sm")}<span>Move ${movable.length} to today</span>`;
       move.title = "Brings not-started WOs to today: under Today here and at the top of Start's To start list";
+      // Everything ticked is a not-started WO of today: they can go to tomorrow (set up the next day tonight).
+      const allTodayPending = n > 0 && ticked.every((r) => r.progress === "notStarted" && isToday(r.day));
+      const tomorrowButton = q(".moveTomorrow");
+      tomorrowButton.classList.toggle("hidden", !allTodayPending);
+      tomorrowButton.innerHTML = `${icon("calendar", "sm")}<span>Move ${n} to tomorrow</span>`;
+      tomorrowButton.title = "Moves them to tomorrow: under Tomorrow here now, under Today and in Start's To start list from midnight";
       q(".done").classList.toggle("hidden", !n);
       q(".done").innerHTML = `${icon("check", "sm")}<span>Mark ${n} done</span>`;
       q(".done").title = "Driven / submitted outside the app: marks them started, ended and closed now";
@@ -214,6 +221,15 @@ export default {
       } catch (error) { toast(error.message, "bad"); }
     });
 
+    q(".moveTomorrow").addEventListener("click", async () => {
+      const wos = tickedRecords().filter((r) => r.progress === "notStarted" && isToday(r.day)).map((r) => r.wo);
+      if (!wos.length) return;
+      try {
+        const r = await api("/api/records/moveToday", { body: { wos, tomorrow: true } });
+        checked.clear(); toast(`Moved ${r.moved} to tomorrow - they show under Today and in Start's To start list from midnight.`, "ok"); load(); refreshState();
+      } catch (error) { toast(error.message, "bad"); }
+    });
+
     // ---------- detail ----------
     async function select(wo) {
       selected = wo;
@@ -260,7 +276,7 @@ export default {
           <div class="spanAll dMsgWrap"><div class="dMsg"></div><div class="jobSlot"></div></div>
           <div class="panel">
             <h3>Details<span class="aside">
-              <button class="btn btnGhost sm send" ${r.lat && r.long ? "" : "disabled"} title="Send the coordinates to Apeksha">${icon("navigate", "sm")}<span>Send</span></button>
+              <button class="btn btnGhost sm send" ${r.lat && r.long ? "" : "disabled"} title="${esc(locationTarget().title)}">${icon("qr", "sm")}<span>${locationTarget().apeksha ? "Send" : "QR"}</span></button>
               <button class="btn btnGhost sm cpLoc" title="Copy WO · Grid Key · Location">${icon("pin", "sm")}<span>Copy</span></button></span></h3>
             ${kv.map(([k, v], n) => `<div class="kvRow"><span class="k">${k}</span><span class="v ${v ? "" : "none"}" title="${esc(v || "")}">${esc(v || "—")}</span>
               <button class="iconBtn sm cp" data-n="${n}" ${v ? "" : "disabled"} title="Copy ${k}">${icon("copy", "sm")}</button></div>`).join("")}
@@ -301,12 +317,7 @@ export default {
       $$(".cp", d).forEach((b) => b.addEventListener("click", () => copyWithFlash(b, kv[+b.dataset.n][1], "")));
       $(".cpLoc", d).addEventListener("click", (e) => copyWithFlash(e.currentTarget, r.locationPreview));
       $(".cpReport", d).addEventListener("click", (e) => copyWithFlash(e.currentTarget, $(".report", d).textContent));
-      $(".send", d).addEventListener("click", async (e) => {
-        const button = e.currentTarget; button.disabled = true;
-        try { const o = await api(`/api/records/${enc(r.wo)}/location`, { method: "POST" }); flash(button, true, "Sent"); dmsg(o.message, "ok"); }
-        catch (error) { flash(button, false); dmsg(`Couldn't send the location: ${error.message}`, "bad"); }
-        finally { button.disabled = false; }
-      });
+      $(".send", d).addEventListener("click", (e) => shareLocation(r, e.currentTarget));
       $(".open", d).addEventListener("click", async () => {
         try { const o = await api(`/api/records/${enc(r.wo)}/openFile`, { method: "POST" }); dmsg(`Opened ${o.opened}`, "ok"); }
         catch (error) { dmsg(error.message, "bad"); }

@@ -244,11 +244,19 @@ kbd { font: 600 10.5px var(--sans); padding: 2px 6px; border-radius: 5px; backgr
 /* compact WO box: the list button sits inside the field, right of the clear button */
 .woBox.compact .insideTools { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); display: flex; align-items: center; gap: 2px; }
 .woBox.compact .insideTools .clear { position: static; transform: none; }
-.woBox.compact .inputWrap .input { padding-right: calc(var(--tools, 2) * 30px + 10px); }
+.woBox.compact .inputWrap .input { padding-right: calc(var(--tools, 2) * 30px + 20px); }
 .woBox.compact .insideTools .pickerBtn { position: static; flex: none; }
 .woBox.compact .insideTools .pickerBtn .popover { top: calc(100% + 10px); right: -6px; }
 .woBox.compact .insideTools .sep { width: 1px; height: 18px; background: var(--border); margin: 0 3px; }
 .woBox.compact .insideTools .iconBtn.done { color: var(--green); }
+.woBox.compact .pick { position: relative; }
+/* Location QR popup */
+.qrBox { display: flex; flex-direction: column; align-items: center; gap: 12px; text-align: center; }
+.qrImg { width: min(260px, 70vw); height: auto; aspect-ratio: 1; background: #fff; border-radius: 10px; padding: 6px; image-rendering: pixelated; }
+.qrLink { font-size: 12.5px; word-break: break-all; color: var(--accent); }
+.qrActions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+.woBox.compact .pickCount { position: absolute; top: -5px; right: -5px; min-width: 15px; height: 15px; padding: 0 3px;
+  border-radius: 999px; background: var(--accent); color: #fff; font: 700 9.5px/15px var(--font, system-ui); text-align: center; }
 .woBox.compact .insideTools .iconBtn.failed { color: var(--red); }
 .woBox.compact .match:empty { display: none; }
 .popover {
@@ -718,7 +726,7 @@ table.sheet td.num { color: var(--faint); width: 1%; }
 .livePage { container: live / inline-size; }
 .liveTopRow { display: grid; gap: 10px; }
 .liveMain { display: grid; gap: 14px; }
-@container live (min-width: 900px) {
+@container live (min-width: 1180px) {
   .liveTopRow { grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); align-items: start; }
   .liveTopRow .pair { margin-top: 22px; }  /* level with the WO box (under its label) */
 }
@@ -783,8 +791,9 @@ table.sheet td.num { color: var(--faint); width: 1%; }
 .phoneCard { container: phone / inline-size; }
 .sigGrid { display: grid; grid-template-columns: minmax(0, 1.4fr) repeat(4, minmax(0, 1fr)); gap: 4px; }
 @container phone (max-width: 400px) {
-  .sigGrid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-  .sig.rsrp { grid-column: 1 / -1; }
+  /* 3 per row: RSRP down the left (both rows), SINR + Band on top, BW + PCI below */
+  .sigGrid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .sig.rsrp { grid-row: span 2; display: flex; flex-direction: column; justify-content: center; }
 }
 .sig.rsrp .v { font-size: 26px; line-height: 1.1; }
 .sig .k .liveDot { width: 7px; height: 7px; margin-left: auto; }

@@ -15,11 +15,13 @@ import ctypes
 import os
 import subprocess
 import sys
+import threading
 import time
 from ctypes import wintypes
 from pathlib import Path
 
-from kaam.phoneControl import configuredPhones, connectedSerials, onEachPhone, say, serviceModeSplit, vysorAppDir
+from kaam.phoneControl import (configuredPhones, connectedSerials, listenHere, listeners, onEachPhone, say,
+                               serviceModeSplit, vysorAppDir)
 
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
@@ -278,9 +280,28 @@ def setupDesk():
     if notShowing:
         say("Opening in Vysor: " + ", ".join(name for name, serial in phones.items() if serial in notShowing))
         openInVysor(notShowing)
-    if ready:
-        onEachPhone(serviceModeSplit, ready)  # both phones at once - no network use here
-    layoutDesk()
+    # The phones (both at once) and the windows on this PC at the same time.
+    parentListener = listeners.get(threading.get_ident())
+    errors = []
+
+    def phonesPart():
+        listenHere(parentListener)
+        try:
+            onEachPhone(serviceModeSplit, ready)
+        except Exception as error:
+            errors.append(error)
+        finally:
+            listenHere(None)
+    phonesThread = threading.Thread(target=phonesPart) if ready else None
+    if phonesThread:
+        phonesThread.start()
+    try:
+        layoutDesk()
+    finally:
+        if phonesThread:
+            phonesThread.join()
+    if errors:
+        raise errors[0]
 
 
 if __name__ == "__main__":

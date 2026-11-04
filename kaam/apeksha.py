@@ -1,7 +1,7 @@
-"""Send a WO's location to Apeksha (your codeShare site), to open on your phone: the preview
-(WO / Grid Key / Location), then a Google Maps link on the next line.
+"""Send a WO's location to Apeksha (your codeShare site), to open on your phone: just its Google
+Maps link (https://www.google.com/maps?q=<lat>,<lon>), which Apeksha shows as a clickable link.
 
-    POST <APEKSHA_URL>/codeShare   {"content": "<preview>\\n<Google Maps link>"}
+    POST <APEKSHA_URL>/codeShare   {"content": "<Google Maps link>"}
 """
 
 import json
@@ -17,17 +17,15 @@ class ApekshaError(Exception):
 
 def mapsLink(lat, lon):
     """A Google Maps link that opens the pin at these coordinates."""
-    return f"https://www.google.com/maps/search/?api=1&query={str(lat).strip()},{str(lon).strip()}"
+    return f"https://www.google.com/maps?q={str(lat).strip()},{str(lon).strip()}"
 
 
-def shareLocation(lat, lon, name=None, preview="", timeout=10):
-    """Sends the preview (e.g. WO / Grid Key / Location lines), then the Maps link on its own line.
-    Returns the site's reply, e.g. {"ok": true, "duplicate": false, ...}.
+def shareLocation(lat, lon, name=None, timeout=10):
+    """Sends just the Maps link. Returns the site's reply, e.g. {"ok": true, "duplicate": false, ...}.
     Raises ApekshaError with a short, readable reason."""
     if not str(lat).strip() or not str(lon).strip():
         raise ApekshaError("No location saved for this WO.")
-    text = "\n".join(part for part in (str(preview or "").strip(), mapsLink(lat, lon)) if part)
-    body = {"content": text}
+    body = {"content": mapsLink(lat, lon)}
     if name:
         body["name"] = name
     request = urllib.request.Request(

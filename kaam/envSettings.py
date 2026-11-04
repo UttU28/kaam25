@@ -48,6 +48,22 @@ fields = [
     # ---------- TEMS ----------
     ("TEMS_PROJECT", "TEMS", "TEMS Cloud project", "text", "Project that lists the WOs to reserve (changes each month).", {"optional": True, "default": temsProject}),
     ("TEMS_URL", "TEMS", "TEMS Paragon address", "url", "The extension only works on http://localhost:8080/.", {"optional": True, "default": temsUrl}),
+    ("TEMS_DATA_URL", "TEMS", "TEMS map data address", "url",
+     "TEMS's own map data service on this PC - Live Testing reads its map from here (read only).",
+     {"optional": True, "default": "http://localhost:8181"}),
+    # ---------- Phones (Live Testing) ----------
+    ("PHONES", "Phones", "Test phones", "text",
+     "Name=serial for each phone, comma-separated, in screen order: TMO 1=<serial>,TMO 2=<serial>. "
+     "Serials: run  adb devices  or look in Vysor. Names must match the phone names in Vysor.",
+     {"optional": True, "default": "TMO 1=<serial>,TMO 2=<serial>"}),
+    ("PHONE_SPLIT_RATIO", "Phones", "Service Mode share of the screen", "text",
+     "Split screen: Service Mode on top, Speedtest below. 0.70 = 70:30.", {"optional": True, "default": "0.70"}),
+    ("PHONE_AIRPLANE_SECONDS", "Phones", "Airplane seconds", "int", "How long airplane mode stays on in Full test / Airplane.",
+     {"optional": True, "default": "5", "min": 1, "max": 60}),
+    ("PHONE_SPEEDTEST_LABEL", "Phones", "Speedtest icon name", "text",
+     "Name of the Speedtest shortcut on the phones' home screen (else speedtest.net opens in Chrome).",
+     {"optional": True, "default": "Speedtest"}),
+    ("PHONE_ADB", "Phones", "adb.exe", "path", "Blank: adb on PATH, else the one inside Vysor.", {"optional": True, "default": ""}),
     # ---------- WhatsApp ----------
     ("WHATSAPP_GROUP", "WhatsApp", "Group name", "text", "Chat name exactly as it shows in WhatsApp.", {}),
     ("WHATSAPP_GROUP_WO", "WhatsApp", "WO group", "text",
@@ -60,7 +76,10 @@ fields = [
     # ---------- Web pages ----------
     ("TICKETS_URL", "Web pages", "TechInsights tickets page", "url", "", {}),
     ("ACTIX_UPLOAD_URL", "Web pages", "ActixOne upload page", "url", "", {}),
-    ("APEKSHA_URL", "Web pages", "Apeksha site", "url", "Where Send location posts coordinates.", {"optional": True, "default": apekshaUrl}),
+    ("APEKSHA_ENABLED", "Web pages", "Use Apeksha", "bool",
+     "On: the WO box's QR icon posts the WO's Google Maps link to Apeksha. Off (default): it shows the link as a QR code (scan to open the spot), with the link and lat / long.",
+     {"optional": True, "default": "false"}),
+    ("APEKSHA_URL", "Web pages", "Apeksha site", "url", "Where the QR icon posts the Maps link (when Use Apeksha is on).", {"optional": True, "default": apekshaUrl}),
     # ---------- Chrome ----------
     ("CHROME_PATHS", "Chrome", "chrome.exe paths", "text", "First one that exists is used. Separate with ;", {}),
     ("CHROME_USER_DATA_DIR", "Chrome", "Chrome user data folder", "dir", "Used to find your last-used Chrome profile.", {}),
@@ -99,6 +118,20 @@ def check(key, value):
     value = value if extra.get("keepSpaces") else str(value).strip()
     if not value.strip():
         return value, None if extra.get("optional") or kind == "readonly" else f"{label} can't be empty.", None
+    if key == "PHONES":
+        items = [item.strip() for item in value.split(",") if item.strip()]
+        bad = [item for item in items if "=" not in item or not all(part.strip() for part in item.split("=", 1))]
+        if bad:
+            return value, f"{label}: write each phone as Name=serial, comma-separated (e.g. TMO 1=R5CY93EAZBH,TMO 2=R5GYB25TW5R).", None
+        if any("<serial>" in item for item in items):
+            return value, None, f"{label}: replace <serial> with each phone's serial (adb devices)."
+    if key == "PHONE_SPLIT_RATIO":
+        try:
+            ratio = float(value)
+        except ValueError:
+            ratio = -1
+        if not 0.3 <= ratio <= 0.85:
+            return value, f"{label} must be a number from 0.30 to 0.85 (0.70 = 70:30).", None
     if kind == "url" and not re.match(r"^https?://\S+$", value):
         return value, f"{label} must start with http:// or https://", None
     if kind == "email" and not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", value):

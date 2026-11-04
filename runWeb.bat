@@ -26,6 +26,9 @@ if not exist "venv\Scripts\python.exe" (
   )
 )
 
+rem A package added since the first run (e.g. segno for QR codes): install what's missing.
+"venv\Scripts\python.exe" -c "import flask, dotenv, openpyxl, segno" >nul 2>&1 || "venv\Scripts\python.exe" -m pip install -r requirements.txt
+
 if not exist ".env" (
   copy ".env.example" ".env" >nul
   echo.

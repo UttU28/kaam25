@@ -1,6 +1,6 @@
 // Start: one cloud start a day (real TechInsights ticket), local starts (LM_N_date) after it.
 import { $, api, copyWithFlash, enc, esc, formModal, icon, modal, onDataChange, refreshState, store, toast } from "../core.js";
-import { jobPanel, locationCard, seg, switchEl, woBox } from "../components.js";
+import { jobPanel, seg, switchEl, woBox } from "../components.js";
 
 export default {
   title: "Start Ticket",
@@ -41,7 +41,6 @@ export default {
           </div>
         </div>
         <div class="stack">
-          <div class="locSlot"></div>
           <div class="card">
             <div class="cardHead"><h2>Import plan</h2><span class="hint">Excel or CSV · team ${esc(settings.employeeId || "")} only</span></div>
             <div class="cardBody stack">
@@ -59,13 +58,12 @@ export default {
       </div>`;
 
     const msg = (text, kind = "info") => { $(".msg", root).innerHTML = text ? `<div class="callout ${kind}">${icon(kind === "ok" ? "check" : kind === "info" ? "info" : "alert", "sm")}<div>${esc(text)}</div></div>` : ""; };
-    const loc = locationCard();
-    $(".locSlot", root).replaceWith(loc.el);
     const job = jobPanel();
     $(".jobSlot", root).replaceWith(job.el);
 
     const box = woBox({
       placeholder: "Paste a WO, grid key or Ticket ID",
+      compact: true, preview: true,
       picker: {
         label: "To start", empty: "Nothing for today. Import today's plan, or use Move to today in Records for older ones.",
         load: async () => (await api("/api/start/waiting")).map((r) => ({
@@ -73,7 +71,6 @@ export default {
         })),
       },
       onResolve: (wo, record, matchedBy) => {
-        loc.show(wo, record);
         if (busy) return;
         // A different WO: clear the last run's job log and Ticket ID so nothing old is left showing.
         if (wo.replace(/\s+/g, "").toLowerCase() !== String(lastWo || "").replace(/\s+/g, "").toLowerCase()) {
@@ -419,7 +416,6 @@ export default {
       if (busy) return;
       loadWaiting();
       const wo = box.get();
-      if (wo) { try { loc.show(wo, await api(`/api/records/${enc(wo)}`)); } catch { /* not in Records */ } }
     });
     return () => { offState(); offData(); };
   },

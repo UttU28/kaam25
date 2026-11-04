@@ -1,6 +1,6 @@
 // Close: finish the day's PASSED cloud ticket in TechInsights, step by step.
 import { $, api, enc, esc, icon, niceTime, onDataChange, refreshState, toast } from "../core.js";
-import { jobPanel, locationCard, statusBadge, woBox } from "../components.js";
+import { jobPanel, statusBadge, woBox } from "../components.js";
 
 export default {
   title: "Close Ticket",
@@ -25,7 +25,6 @@ export default {
           </div>
         </div>
         <div class="stack">
-          <div class="locSlot"></div>
           <div class="card">
             <div class="cardHead"><h2>Ready to close</h2><span class="hint readyCount"></span></div>
             <div class="list listScroll ready" style="padding:6px 0"></div>
@@ -33,13 +32,13 @@ export default {
         </div>
       </div>`;
     const q = (s) => $(s, root);
-    const loc = locationCard(); q(".locSlot").replaceWith(loc.el);
     const job = jobPanel(); q(".jobSlot").replaceWith(job.el);
     const msg = (text, kind = "info") => { q(".msg").innerHTML = text ? `<div class="callout ${kind}">${icon(kind === "ok" ? "check" : kind === "info" ? "info" : "alert", "sm")}<div>${esc(text)}</div></div>` : ""; };
 
     let shownKey = "";
     const box = woBox({
       placeholder: "Pick from Ready to close, or paste its WO / Ticket ID",
+      compact: true, preview: true,
       picker: {
         label: "Ready to close", empty: "Nothing ready to close.",
         load: async () => (await api("/api/close/ready")).map((r) => ({ wo: r.wo, title: r.cluster || r.wo, sub: r.ticketId || "no ticket ID" })),
@@ -55,7 +54,6 @@ export default {
     q(".woSlot").replaceWith(box.el);
 
     function paint(wo, keepMessage = false) {
-      loc.show(wo, record);
       const r = record || {};
       const close = r.close || { steps: [], canClose: false };
       q(".info").innerHTML = record ? [

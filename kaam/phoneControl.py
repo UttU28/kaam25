@@ -271,7 +271,7 @@ def runSpeedtest(serial, timeout=180):
         now = evalOnSpeedtest(serial, speedtestResultScript) or {}
         if now.get("finished") and now.get("resultId") and now.get("resultId") != before.get("resultId"):
             loaded = f", {now['pingLoaded']} ms loaded" if now.get("pingLoaded") else ""
-            say(f"[{name}] result: {now.get('download') or '?'} Mbps down, ping {now.get('ping') or '?'} ms{loaded}"
+            say(f"[{name}] speed test done: {now.get('download') or '?'} Mbps down, ping {now.get('ping') or '?'} ms{loaded}"
                 f" (Result ID {now['resultId']})")
             if network.get("source") != "serviceMode":  # Service Mode wasn't ready at the start: try again
                 later = readNetwork(serial)
@@ -435,24 +435,59 @@ def screenBottom(serial):
     return int(size.group(2)) if size else 2340
 
 
+def splitDivider(serial):
+    """(x, y) of the split-screen divider, from the window list (~0.1 s): the gap between the top
+    app's window and the bottom one. None when the screen isn't split."""
+    frames = re.findall(r"Frames: parent=\S+ display=\S+ frame=\[(\d+),(\d+)\]\[(\d+),(\d+)\]",
+                        adbShell(serial, "dumpsys window windows | grep -E 'Frames: parent'"))
+    boxes = sorted({tuple(map(int, f)) for f in frames}, key=lambda box: box[1])
+    pairs = [(a, b) for a in boxes for b in boxes if a[1] < b[1]]
+    for (l1, t1, r1, b1), (l2, t2, r2, b2) in pairs:
+        # two app windows the same width, one right above the other with a small gap: the split
+        if l1 == l2 and r1 == r2 and r1 - l1 > 500 and t1 < t2 and 0 <= t2 - b1 <= 120 and b1 - t1 > 200 and b2 - t2 > 200:
+            return (l1 + r1) // 2, (b1 + t2) // 2
+    return None
+
+
 def resizeSplit(serial, ratio=splitRatio):
     """Drags the split-screen divider so the top app gets `ratio` of the screen."""
+    name = phoneName(serial)
     target = round(screenBottom(serial) * ratio)
-    for _ in range(3):
-        divider = findNode(serial, lambda text, desc: desc == "Split screen divider")
+    share = f"{round(ratio * 100)}:{100 - round(ratio * 100)}"
+    for attempt in range(3):
+        divider = splitDivider(serial)
+        if not divider:  # fall back to reading the screen
+            found = findNode(serial, lambda text, desc: desc == "Split screen divider")
+            divider = found[1:] if found else None
         if not divider:
-            say(f"[{phoneName(serial)}] WARNING: split-screen divider not found, size left as it is")
+            say(f"[{name}] WARNING: split-screen divider not found, size left as it is")
             return
-        _, x, y = divider
+        x, y = divider
         if abs(y - target) <= 35:  # close enough; the phone ignores very small drags anyway
+            if attempt:
+                say(f"[{name}] screen split set to {share}")
             return
+        if not attempt:
+            say(f"[{name}] setting the screen split to {share}")
         # Drags fall a little short, so aim past the target by a quarter of the gap.
         adbShell(serial, f"input swipe {x} {y} {x} {target + (target - y) // 4} 800")
-        time.sleep(1.2)
+        time.sleep(0.9)
+
+
+def onSimPage(serial, freshSeconds=20):
+    """Live Testing's signal reader saw Service Mode's SIM page just now (no screen read needed)."""
+    try:
+        from . import liveSignal
+        seen = liveSignal.screen.get(serial)
+        return bool(seen) and time.time() - seen["at"] < freshSeconds
+    except Exception:
+        return False
 
 
 def openActiveSim(serial, waitSeconds=5):
     """Taps the '[n] SIMn INFORMATION' row in Service Mode (the SIM that's in use; 1 or 2)."""
+    if onSimPage(serial):
+        return
     for _ in range(max(1, int(waitSeconds * 2))):
         row = findNode(serial, lambda text, desc: re.search(r"SIM\d\s+INFORMATION", text, re.I))
         if row:
@@ -695,10 +730,35 @@ def leaveSplitScreen(serial):
         time.sleep(1)
 
 
+def recentSpeedtestTask(serial):
+    """Task id of the Speedtest web app (Chrome) still in recent apps, or None."""
+    text = adbShell(serial, "dumpsys activity recents | grep -E 'Recent #|realActivity='")
+    # "Recent #n" lines (standard apps only) and the realActivity lines that follow come in the same order.
+    tasks = [(int(found.group(1)), found.group(2)) for found in
+             re.finditer(r"Recent #\d+: Task\{\S+ #(\d+) type=standard A=\d+:([^\s}]+)", text)]
+    activities = re.findall(r"realActivity=\{([^}]*)\}", text)
+    for (task, app), activity in zip(tasks, activities):
+        if app == "com.android.chrome" and "WebappActivity" in activity:
+            return task
+    return None
+
+
+def bothOnScreen(serial, timeout=4):
+    """Waits until Service Mode and Chrome are both on screen (split)."""
+    end = time.time() + timeout
+    while True:
+        components = [component for component, _ in resumedActivities(serial)]
+        if any("ServiceMode" in c for c in components) and any("chrome" in c for c in components):
+            return True
+        if time.time() >= end:
+            return False
+        time.sleep(0.3)
+
+
 def openSpeedtest(serial):
     """Opens the Speedtest shortcut from the home screen; falls back to speedtest.net in Chrome."""
     adbShell(serial, "input keyevent KEYCODE_HOME")
-    time.sleep(1.5)
+    time.sleep(0.8)
     if tapLabel(serial, speedtestLabel):
         return waitForActivity(serial, "com.android.chrome")
     say(f"[{phoneName(serial)}] no '{speedtestLabel}' icon on the home screen, opening {speedtestUrl} in Chrome")
@@ -724,7 +784,7 @@ def openServiceMode(serial):
     """Opens the phone app and types *#0011#, which opens Service Mode."""
     adbShell(serial, "am start -a android.intent.action.DIAL")
     dialerTask = waitForActivity(serial, "dialer")
-    time.sleep(1)
+    time.sleep(0.6)
     adbShell(serial, f"input text '{serviceModeCode}'")
     taskId = waitForActivity(serial, "ServiceMode")
     # The Phone app has done its job: close it and take it out of the recent apps.
@@ -737,31 +797,44 @@ def serviceModeSplit(serial):
     only the split size, SIM page and Speedtest popup are checked."""
     name = phoneName(serial)
     wakeAndUnlock(serial)
-    onScreen =[component for component, _ in resumedActivities(serial)]
-    if any("ServiceMode" in c for c in onScreen) and any("chrome" in c for c in onScreen):
-        say(f"[{name}] Service Mode and Speedtest already open, adjusting only")
+    started = time.time()
+    ready = lambda: say(f"[{name}] ready: Service Mode on top ({round(splitRatio * 100)}%), Speedtest below "
+                        f"({time.time() - started:.0f}s)")
+    if bothOnScreen(serial, timeout=0):
+        say(f"[{name}] Service Mode and Speedtest already open, checking the split")
         resizeSplit(serial)
         openActiveSim(serial, waitSeconds=0)  # only if Service Mode is on its main menu
-        closeSpeedtestPopup(serial, waitSeconds=0)
-        say(f"[{name}] ready: Service Mode on top ({round(splitRatio * 100)}%), Speedtest below")
+        ready()
         return
-    # Service Mode closes itself as soon as it leaves the screen, so otherwise it's set up from scratch.
+    # Service Mode closes itself as soon as it leaves the screen, so it's always opened again; Speedtest
+    # is reused from recent apps when it's still there (no trip to the home screen).
     leaveSplitScreen(serial)
-    say(f"[{name}] opening Speedtest")
-    speedtestTask = openSpeedtest(serial)
+    speedtestTask, reused = recentSpeedtestTask(serial), True
+    if not speedtestTask:
+        say(f"[{name}] opening Speedtest")
+        speedtestTask, reused = openSpeedtest(serial), False
+    else:
+        say(f"[{name}] Speedtest is in recent apps - reusing it")
     say(f"[{name}] opening Service Mode ({serviceModeCode})")
     openServiceMode(serial)
-    time.sleep(1)
+    say(f"[{name}] Service Mode opened")
     splitScreen(serial, f"moveToSideStage {speedtestTask} 1")  # 1 = bottom half
-    time.sleep(1.5)
-    components = [component for component, _ in resumedActivities(serial)]
-    if not (any("ServiceMode" in c for c in components) and any("chrome" in c for c in components)):
+    if not bothOnScreen(serial) and reused:
+        # The recent Speedtest couldn't join the split: open it fresh (Service Mode again too).
+        say(f"[{name}] recent Speedtest didn't join the split - opening it fresh")
+        leaveSplitScreen(serial)
+        speedtestTask, reused = openSpeedtest(serial), False
+        openServiceMode(serial)
+        splitScreen(serial, f"moveToSideStage {speedtestTask} 1")
+    if not bothOnScreen(serial):
+        components = [component for component, _ in resumedActivities(serial)]
         say(f"[{name}] WARNING: split screen may not have opened (on screen: {', '.join(components)})")
         return
+    say(f"[{name}] split screen on: Service Mode on top, Speedtest below")
     resizeSplit(serial)
     openActiveSim(serial)
-    closeSpeedtestPopup(serial)
-    say(f"[{name}] ready: Service Mode on top ({round(splitRatio * 100)}%), Speedtest below")
+    closeSpeedtestPopup(serial, waitSeconds=0 if reused else 5)
+    ready()
 
 
 # ---------- command line ----------

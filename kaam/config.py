@@ -110,6 +110,14 @@ whatsappAutoShare = (os.environ.get("WHATSAPP_AUTO_SHARE") or "true").strip().lo
 # ---------- Apeksha (share a location to your site) ----------
 # Optional in .env; defaults to your site.
 apekshaUrl = (os.environ.get("APEKSHA_URL") or "https://apekshaapi.thatinsaneguy.com").strip().rstrip("/")
+# The WO box's QR icon: on = posts the WO's Google Maps link to Apeksha; off (default) = shows the
+# link as a QR code (scan it to open the spot, even with little or no internet), the link and lat / long.
+apekshaEnabled = (os.environ.get("APEKSHA_ENABLED") or "false").strip().lower() in ("1", "true", "yes", "on")
+
+
+def locationTarget():
+    """("apeksha", "Apeksha") when Apeksha is on, else ("qr", "QR code")."""
+    return ("apeksha", "Apeksha") if apekshaEnabled else ("qr", "QR code")
 
 # ---------- tabs ----------
 closeTabsWhenDone = getBool("CLOSE_TABS_WHEN_DONE")

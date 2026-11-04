@@ -1,17 +1,63 @@
 // Reusable pieces: WO box, location card, segmented control, switch, job panel.
-import { $, $$, api, cleanWo, copyWithFlash, debounce, enc, esc, flash, h, icon, stopAll, toast, watchJob } from "./core.js";
+import { $, $$, api, cleanWo, copyText, copyWithFlash, debounce, enc, esc, flash, h, icon, modal, stopAll, store, toast, watchJob } from "./core.js";
 
-const matchedNames = { gridKey: "Grid key", ticketId: "Ticket ID", excelWo: "The Excel spelling" };
+// The WO's location: Apeksha on -> its Google Maps link is posted there; off -> a QR code of the link
+// (scan it to open the spot, even with little or no internet), the link, Copy link and lat / long.
+export const mapsUrl = (lat, lon) => `https://www.google.com/maps?q=${String(lat).trim()},${String(lon).trim()}`;
+export function locationTarget() {
+  const apeksha = store.settings?.locationVia === "apeksha";
+  return { apeksha, title: apeksha ? "Send the WO's Google Maps link to Apeksha" : "QR code of the WO's Google Maps link (scan to open the spot)" };
+}
+export async function shareLocation(record, button) {
+  const lat = record?.lat, lon = record?.long, wo = record?.wo || "";
+  if (!lat || !lon) { toast("No location saved for this WO.", "warn"); return; }
+  if (!locationTarget().apeksha) { showLocationQr(wo, lat, lon); return; }
+  if (button) button.disabled = true;
+  try {
+    const data = await api(`/api/records/${enc(wo)}/location`, { method: "POST" });
+    if (button) flash(button, true, "Sent");
+    toast(data.message || "Sent the Maps link to Apeksha.", "ok");
+  } catch (error) {
+    if (button) flash(button, false);
+    toast(`Couldn't send to Apeksha: ${error.message}`, "bad", 8000);
+  } finally { if (button) button.disabled = false; }
+}
+export function showLocationQr(wo, lat, lon) {
+  const url = mapsUrl(lat, lon);
+  modal({
+    title: wo || "Location",
+    body: `<div class="qrBox">
+        <img class="qrImg" src="/api/qr?text=${enc(url)}" alt="QR code for ${esc(url)}">
+        <a class="qrLink mono" href="${esc(url)}" target="_blank" rel="noopener">${esc(url)}</a>
+        <div class="qrActions">
+          <button class="btn btnPrimary qrCopy">${icon("copy", "sm")}<span>Copy link</span></button>
+          <button class="btn btnGhost qrCopyLatLon" title="Copy lat, long">${icon("pin", "sm")}<span>${esc(lat)}, ${esc(lon)}</span></button>
+        </div>
+        <div class="note">Scan with a phone camera to open the spot in Google Maps.</div>
+      </div>`,
+    buttons: [{ label: "Close", value: true }],
+  });
+  const box = $("#modalRoot .qrBox");
+  $(".qrCopy", box).addEventListener("click", (e) => copyWithFlash(e.currentTarget, url, "Link copied"));
+  $(".qrCopyLatLon", box).addEventListener("click", (e) => copyWithFlash(e.currentTarget, `${lat}, ${lon}`, "Copied"));
+}
 
 // ---------- WO box ----------
 // opts: label, placeholder, picker {label, empty, load: async () => [{wo, title, sub, badge}]},
 //       onResolve(wo, record, matchedBy), onEnter(wo)
 //       compact: true - no Copy button, the picker is a small list button inside the box
 //       tools: extra icon buttons (html) inside a compact box, left of the list button
+//       preview: true (compact) - copy / send icons: copy the preview (WO / Grid Key / Location),
+//                QR icon: the Maps link as a QR code (or to Apeksha when it's on). No preview text is shown anywhere.
 export function woBox(opts = {}) {
+  const previewHtml = opts.compact && opts.preview
+    ? `<button class="iconBtn sm copyPreview" title="Copy the preview (WO / Grid Key / Location)">${icon("copy", "sm")}</button>
+       <button class="iconBtn sm sendPreview" title="${esc(locationTarget().title)}">${icon("qr", "sm")}</button>
+       ${opts.picker ? `<span class="sep"></span>` : ""}`
+    : "";
   const pickerHtml = !opts.picker ? ""
     : opts.compact
-      ? `<div class="pickerBtn"><button class="iconBtn sm pick" title="${esc(opts.picker.label)}">${icon("chevron", "sm")}</button></div>`
+      ? `<div class="pickerBtn"><button class="iconBtn sm pick" title="${esc(opts.picker.label)}">${icon("chevron", "sm")}<span class="pickCount hidden"></span></button></div>`
       : `<div class="pickerBtn"><button class="btn btnGhost pick" title="${esc(opts.picker.label)}">${icon("list", "sm")}<span class="pickLabel">${esc(opts.picker.label)}</span>${icon("chevron", "sm")}</button></div>`;
   const el = h(`<div class="field woBox ${opts.compact ? "compact" : ""}">
       <label class="label">${esc(opts.label || "WO")}</label>
@@ -19,7 +65,7 @@ export function woBox(opts = {}) {
         <div class="inputWrap">
           <input class="input mono" spellcheck="false" autocomplete="off" placeholder="${esc(opts.placeholder || "Paste a WO, grid key or Ticket ID")}">
           ${opts.compact
-            ? `<div class="insideTools"><button class="iconBtn sm clear hidden" title="Clear">${icon("x", "sm")}</button>${opts.tools || ""}${pickerHtml}</div>`
+            ? `<div class="insideTools"><button class="iconBtn sm clear hidden" title="Clear">${icon("x", "sm")}</button>${previewHtml}${opts.tools || ""}${pickerHtml}</div>`
             : `<button class="iconBtn sm clear hidden" title="Clear">${icon("x", "sm")}</button>`}
         </div>
         ${opts.compact ? "" : `<button class="btn btnGhost copyBtn" title="Copy the WO">${icon("copy", "sm")}<span>Copy</span></button>${pickerHtml}`}
@@ -28,6 +74,36 @@ export function woBox(opts = {}) {
     </div>`);
   const input = $("input", el), clear = $(".clear", el), match = $(".match", el);
   let record = null, lastResolved = null, token = 0;
+  // Room for the icons inside the box: clear + copy + send + list.
+  el.style.setProperty("--tools", 1 + (previewHtml ? 2 : 0) + (opts.picker ? 1 : 0));
+
+  // Copy / send the preview of the WO in the box (as Records has it).
+  const tick = (button, ok) => {
+    const was = button.innerHTML;
+    button.classList.add(ok ? "done" : "failed");
+    button.innerHTML = icon(ok ? "check" : "x", "sm");
+    setTimeout(() => { button.classList.remove("done", "failed"); button.innerHTML = was; }, 1400);
+  };
+  const previewText = () => {
+    const wo = cleanWo(input.value);
+    if (!wo) return "";
+    if (record?.locationPreview) return record.locationPreview;
+    return `WO: ${wo}\nGrid Key: ${record?.gridKey || ""}\nLocation: ${record?.location || ""}`;
+  };
+  $(".copyPreview", el)?.addEventListener("click", async (event) => {
+    const button = event.currentTarget, text = previewText();
+    if (!text) { toast("Type or pick a WO first.", "warn"); return; }
+    const ok = await copyText(text);
+    tick(button, ok);
+    toast(ok ? "Preview copied." : "Couldn't copy the preview.", ok ? "ok" : "bad");
+  });
+  $(".sendPreview", el)?.addEventListener("click", async () => {
+    const wo = cleanWo(input.value);
+    if (!wo) { toast("Type or pick a WO first.", "warn"); return; }
+    if (!record) { toast(`${wo} isn't in Records.`, "warn"); return; }
+    if (!record.hasLocation) { toast("No location saved for this WO.", "warn"); return; }
+    shareLocation({ ...record, wo: record.wo || wo });
+  });
 
   const resolveNow = async () => {
     const raw = input.value;
@@ -153,6 +229,10 @@ export function woBox(opts = {}) {
     setPickerCount(count) {
       const label = $(".pickLabel", el);
       if (label) label.textContent = `${opts.picker.label}${count ? ` (${count})` : ""}`;
+      const badge = $(".pickCount", el);  // compact: a small number on the list button
+      if (badge) { badge.textContent = count || ""; badge.classList.toggle("hidden", !count); }
+      const pick = $(".pick", el);
+      if (pick) pick.title = `${opts.picker.label}${count ? ` (${count})` : ""}`;
     },
   };
 }
@@ -165,7 +245,7 @@ export function locationCard(title = "WO · Grid Key · Location") {
   const el = h(`<div class="card loc">
       <div class="cardHead"><h2>${esc(title)}</h2>
         <div class="actions">
-          <button class="btn btnGhost sm send" title="Send the preview and a Maps link to Apeksha">${icon("navigate", "sm")}<span>Send</span></button>
+          <button class="btn btnGhost sm send" title="${esc(locationTarget().title)}">${icon("qr", "sm")}<span>${locationTarget().apeksha ? "Send" : "QR"}</span></button>
           <button class="btn btnGhost sm copy" title="Copy all of it">${icon("copy", "sm")}<span>Copy</span></button>
         </div></div>
       <div class="cardBody"><pre class="pre"></pre><div class="note locNote" style="margin-top:8px"></div></div>
@@ -192,7 +272,7 @@ export function locationCard(title = "WO · Grid Key · Location") {
     hasLocation = Boolean(lat && lon);
     pre.textContent = `WO: ${wo}\nGrid Key: ${record?.gridKey || ""}\nLocation: ${lat || lon ? `${lat}, ${lon}` : ""}`;
     send.disabled = !hasLocation;
-    send.title = hasLocation ? `Send the preview and a Maps link for ${lat}, ${lon} to Apeksha` : "No location saved for this WO";
+    send.title = hasLocation ? locationTarget().title : "No location saved for this WO";
   }
   show("", null);
   return { el, show };

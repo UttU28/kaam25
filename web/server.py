@@ -217,7 +217,9 @@ def wosForDay(dayText, records=None):
     """A day's WOs, as the Maps and Sheets pages show them: {key: (record, category)}.
     Driven that day (started or ended then): completed / doing. The rest of that day's list
     (Records' day, plus Start's To start list today): pending today, missed on a past day."""
-    isToday = dayText == datetime.now().date().isoformat()
+    todayText = datetime.now().date().isoformat()
+    isToday = dayText == todayText
+    ahead = dayText >= todayText  # today or a later day (e.g. tomorrow's plan): still to drive, not missed
     records = searchRecords("") if records is None else records
     picked = {}
     for record in records:
@@ -228,7 +230,7 @@ def wosForDay(dayText, records=None):
     for record in records:  # the day's list, as in Records (imported / moved / created that day)
         key = woKey(record.get("wo"))
         if key not in picked and not record.get("startedAt") and (recordDay(record) or "").startswith(dayText):
-            picked[key] = (record, "pending" if isToday else "missed")
+            picked[key] = (record, "pending" if ahead else "missed")
     if isToday:  # plus everything on Start's To start list (imported or moved to today)
         for record in notStartedRecords():
             picked.setdefault(woKey(record.get("wo")), (record, "pending"))
@@ -278,6 +280,10 @@ def mapPoints():
         for field in ("startedAt", "endedAt"):
             if len(record.get(field) or "") >= 10:
                 days.add(record[field][:10])
+        # A later day (moved to tomorrow in Records) with WOs on it: in the list to plan ahead.
+        recordOn = (recordDay(record) or "")[:10]
+        if recordOn > today.isoformat() and not record.get("startedAt"):
+            days.add(recordOn)
     picked = wosForDay(dayText, records)
 
     points, noLocation = [], []
@@ -294,7 +300,7 @@ def mapPoints():
                        "drivenAt": record.get("startedAt") or record.get("endedAt")})
     with routeOrderLock:
         saved = readRouteOrders().get(dayText)
-    return jsonify({"date": dayText, "isToday": isToday, "dates": sorted(days, reverse=True),
+    return jsonify({"date": dayText, "isToday": isToday, "planning": day >= today, "dates": sorted(days, reverse=True),
                     "points": points, "noLocation": noLocation, "savedOrder": saved})
 
 
@@ -342,7 +348,7 @@ def mapSequenceSave():
     import json
     data = body()
     dayText = str(data.get("date") or "")
-    if dayText != datetime.now().date().isoformat():
+    if not dayText or dayText < datetime.now().date().isoformat():  # today or a later day's plan
         return jsonify({"ok": False})
     keys = [str(key) for key in (data.get("keys") or []) if key]
     with routeOrderLock:
@@ -416,6 +422,8 @@ def settings():
         "paths": {"Tickets file": str(config.ticketStoreFile), "Drive logs": str(config.logRootDir),
                   "Work order output": str(config.workOrderOutputDir), "Debug log": str(config.debugLogPath),
                   "Settings (.env)": str(config.envPath)},
+        # the WO box's QR icon: "apeksha" (post the Maps link) or "qr" (show the QR code)
+        "locationTarget": config.locationTarget()[1], "locationVia": config.locationTarget()[0],
         "urls": {"TechInsights": config.ticketsUrl, "ActixOne": config.actixUploadUrl, "TEMS Paragon": config.temsUrl, "TEMS project": config.temsProject,
                  "Apeksha": config.apekshaUrl},
         "bridge": bridgeStatus(),
@@ -512,8 +520,9 @@ def recordDelete(wo):
 
 @app.post("/api/records/moveToday")
 def recordsMoveToday():
-    wos = body().get("wos") or []
-    moved = moveToToday(wos)
+    """{"wos": [...], "tomorrow": true} moves them to tomorrow instead (for the next day's plan)."""
+    data = body()
+    moved = moveToToday(data.get("wos") or [], tomorrow=bool(data.get("tomorrow")))
     return jsonify({"moved": moved})
 
 
@@ -552,6 +561,21 @@ def recordOpenFile(wo):
     except Exception as error:
         return fail(f"Couldn't open the file: {error}")
     return jsonify({"opened": str(opened)})
+
+
+@app.get("/api/qr")
+def qrCode():
+    """A QR code (SVG) for ?text= - e.g. a WO's Google Maps link. Made on this PC, no internet needed."""
+    import io
+    import segno
+    text = (request.args.get("text") or "").strip()
+    if not text or len(text) > 500:
+        return fail("Nothing to put in a QR code.")
+    out = io.BytesIO()
+    segno.make(text, error="m").save(out, kind="svg", scale=8, border=3, dark="#000000", light="#ffffff", xmldecl=False)
+    response = app.response_class(out.getvalue(), mimetype="image/svg+xml")
+    response.headers["Cache-Control"] = "max-age=86400"
+    return response
 
 
 @app.post("/api/records/<path:wo>/location")
@@ -727,6 +751,27 @@ def whatsapp():
     send = data.get("send")
     job = startJob("whatsapp", wo, f"WhatsApp {wo}",
                    lambda job: workflows.shareTicket(wo, report, send=send, progress=job.progress))
+    return jsonify({"job": job.toJson()})
+
+
+@app.post("/api/whatsapp/woDone")
+def whatsappWoDone():
+    """Sheets' Coordinator Data: the whole list ("<WO> - Done" per line) in one message to the WO group."""
+    data = body()
+    wos = [workflows.cleanWorkOrder(wo) for wo in data.get("wos") or []]
+    wos = [wo for wo in wos if wo]
+    if not wos:
+        return fail("No WOs to send.")
+    if not config.whatsappWoGroup:
+        return fail("No WO group set - add WHATSAPP_GROUP_WO in Settings (WhatsApp) first.")
+    send = data.get("send")
+
+    def work(job):
+        summary = workflows.sendWoDone(wos, send=send, progress=job.progress, onlyNew=False)
+        if "not sent" in summary:
+            raise RuntimeError(summary)
+        return {"ok": True, "summary": summary}
+    job = startJob("whatsappWo", "", f"WhatsApp {config.whatsappWoGroup}: {len(wos)} done", work)
     return jsonify({"job": job.toJson()})
 
 

@@ -167,7 +167,8 @@ function mountMap(L, root, mapEl) {
   const legs = { driven: { key: null, layers: [], info: null }, plan: { key: null, layers: [], info: null } };
   const routeCache = new Map();
   let firstFit = true, pickMode = false, alive = true, dragging = null, renderPending = false;
-  const isToday = () => Boolean(data?.isToday);
+  // Today or a later day (tomorrow's plan): what's left to drive, the route, its order.
+  const isToday = () => Boolean(data?.planning ?? data?.isToday);
 
   const map = L.map(mapEl, { zoomControl: true });
   // Dark = Esri streets with a night filter (no API key needed, full street detail).
@@ -267,7 +268,9 @@ function mountMap(L, root, mapEl) {
 
   // ----- what goes where -----
   const catOf = (key) => CATS.find((c) => c.key === key);
-  const catLabel = (p) => { const c = catOf(p.category); return !isToday() && c.pastLabel ? c.pastLabel : c.label; };
+  // "To do today" on a later day (tomorrow's plan) is just "To do".
+  const dayWord = (text) => (data?.isToday === false && data?.planning ? text.replace(/ today$/, "") : text);
+  const catLabel = (p) => { const c = catOf(p.category); return dayWord(!isToday() && c.pastLabel ? c.pastLabel : c.label); };
   const applies = (c) => (c.today ? isToday() : c.past ? !isToday() : true);
   const visiblePoints = () => points.filter((p) => filter[p.category] && applies(catOf(p.category)));
   const drivenStart = (p) => p.drivenAt || "";
@@ -456,7 +459,7 @@ function mountMap(L, root, mapEl) {
     CATS.forEach((c) => {
       filterBox.querySelector(`[data-row="${c.key}"]`).classList.toggle("hidden", !applies(c));
       filterBox.querySelector(`[data-count="${c.key}"]`).textContent = points.filter((p) => p.category === c.key).length;
-      filterBox.querySelector(`[data-label="${c.key}"]`).textContent = !isToday() && c.pastLabel ? c.pastLabel : c.label;
+      filterBox.querySelector(`[data-label="${c.key}"]`).textContent = dayWord(!isToday() && c.pastLabel ? c.pastLabel : c.label);
     });
     filterBox.querySelectorAll("[data-today]").forEach((el) => el.classList.toggle("hidden", !isToday()));
     const shown = visiblePoints().length, total = points.filter((p) => applies(catOf(p.category))).length;
@@ -643,9 +646,12 @@ function mountMap(L, root, mapEl) {
   function fillDates() {
     const dates = data.dates.includes(data.date) ? data.dates : [data.date, ...data.dates];
     dateSelect.innerHTML = dates.map((d) => `<option value="${d}" ${d === data.date ? "selected" : ""}>${
-      isTodayDate(d) ? `Today · ${dayName(d)}` : dayName(d, true)}</option>`).join("");
+      isTodayDate(d) ? `Today · ${dayName(d)}` : isTodayDate(d, 1) ? `Tomorrow · ${dayName(d)}` : dayName(d, true)}</option>`).join("");
   }
-  const isTodayDate = (d) => { const n = new Date(); return d === `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`; };
+  const isTodayDate = (d, plusDays = 0) => {
+    const n = new Date(); n.setDate(n.getDate() + plusDays);
+    return d === `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
+  };
   dateSelect.addEventListener("change", () => switchDay(dateSelect.value));
   $("#mapRefresh", root).addEventListener("click", () => load());
 

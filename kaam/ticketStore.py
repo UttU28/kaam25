@@ -397,22 +397,28 @@ def markDone(wos):
     return marked
 
 
-def moveToToday(wos):
+def moveToToday(wos, tomorrow=False):
     """Bring not-started WOs (e.g. left over from an earlier day's plan) to today: they show under
     today in Records and at the top of Start's "To start" list, ready to start as cloud or local.
+    tomorrow=True: to tomorrow instead (set up the next day's plan tonight) - "movedToDayAt" is
+    tomorrow 00:00, so they show under Tomorrow now and under Today / in To start from midnight.
     Saves "movedToDayAt"; nothing else changes. Started WOs are skipped. One write.
     Returns how many were moved."""
+    from datetime import timedelta
     moved = 0
     with storeLock:
         tickets = readFile()
         stamp = now()
+        day = (datetime.now().date() + timedelta(days=1)) if tomorrow else None
+        movedTo = f"{day.isoformat()}T00:00:00" if tomorrow else stamp
+        event = f"Moved to tomorrow ({day.strftime('%b')} {day.day}) in Records" if tomorrow else "Moved to today in Records"
         for wo in wos:
             record = tickets.get(woKey(wo))
             if record is None or record.get("startedAt"):
                 continue
-            record["movedToDayAt"] = stamp
+            record["movedToDayAt"] = movedTo
             record["updatedAt"] = stamp
-            record.setdefault("history", []).append({"at": stamp, "event": "Moved to today in Records"})
+            record.setdefault("history", []).append({"at": stamp, "event": event})
             record["history"] = record["history"][-maxHistory:]
             moved += 1
         if moved:

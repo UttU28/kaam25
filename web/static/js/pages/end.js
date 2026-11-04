@@ -1,7 +1,7 @@
 // End: find + verify the ticket (cloud) or skip that (local), copy GridSummary, upload EQ3/EQ6,
 // build the report, save it, share it on WhatsApp, mark the ticket done.
 import { $, api, copyText, copyWithFlash, enc, esc, flash, formatReport, icon, modal, onDataChange, refreshState, setWhatsappSend, store, toast } from "../core.js";
-import { jobPanel, locationCard, seg, switchEl, woBox } from "../components.js";
+import { jobPanel, seg, switchEl, woBox } from "../components.js";
 
 export default {
   title: "End Ticket",
@@ -55,7 +55,6 @@ export default {
           </div>
         </div>
         <div class="stack stickyCol">
-          <div class="locSlot"></div>
           <div class="card">
             <div class="cardHead"><h2>Report</h2><span class="hint savedHint"></span></div>
             <div class="cardBody stack">
@@ -76,12 +75,12 @@ export default {
       </div>`;
 
     const q = (s) => $(s, root);
-    const loc = locationCard(); q(".locSlot").replaceWith(loc.el);
     const job = jobPanel(); q(".jobSlot").replaceWith(job.el);
     const msg = (text, kind = "info") => { q(".msg").innerHTML = text ? `<div class="callout ${kind}">${icon(kind === "ok" ? "check" : kind === "info" ? "info" : "alert", "sm")}<div>${esc(text)}</div></div>` : ""; };
 
     const box = woBox({
       placeholder: "Paste a WO, grid key or Ticket ID, then Enter",
+      compact: true, preview: true,
       picker: {
         label: "Today's open", empty: "No open tickets today.",
         load: async () => (await api("/api/end/open")).map((r) => ({
@@ -182,7 +181,6 @@ export default {
     }
     // A different WO: clear everything from the one before, then fill in what Records has for it.
     function onWo(wo) {
-      loc.show(wo, record);
       const key = (wo || "").replace(/\s+/g, "").toUpperCase();
       if (key !== shownKey && !busy) {
         const hadOne = Boolean(shownKey);
@@ -212,7 +210,6 @@ export default {
       const wo = box.get();
       if (!wo) { record = null; return update(); }
       try { record = await api(`/api/records/${enc(wo)}`); } catch { record = null; }
-      loc.show(wo, record);
       update();
     }
     async function quietSave() {

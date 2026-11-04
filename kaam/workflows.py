@@ -464,13 +464,15 @@ def doneMessage(wos):
     return "\n".join(f"{wo} - Done" for wo in wos)
 
 
-def sendWoDone(wos, send=None, progress=lambda text: None):
+def sendWoDone(wos, send=None, progress=lambda text: None, onlyNew=True):
     """"<WO> - Done" (all of them in one message) to the WO group (WHATSAPP_GROUP_WO), for the WOs
-    not done there yet. Returns a summary line, or "" when there's no WO group / nothing to send."""
+    not done there yet (onlyNew=False: all of them, e.g. Sheets' whole list).
+    Returns a summary line, or "" when there's no WO group / nothing to send."""
     from .config import whatsappSend, whatsappWoGroup
     from .whatsappShare import sendTextOnWhatsApp
     send = whatsappSend if send is None else send
-    wos = [wo for wo in wos if not (getRecord(wo) or {}).get("woDoneSentAt")]
+    if onlyNew:
+        wos = [wo for wo in wos if not (getRecord(wo) or {}).get("woDoneSentAt")]
     if not whatsappWoGroup or not wos:
         return ""
     progress(f"WhatsApp {whatsappWoGroup}: {', '.join(wos)} - Done…")
@@ -512,17 +514,19 @@ def shareTicket(wo, report, send=None, csvPath=None, progress=lambda text: None,
 
 # ---------- Apeksha ----------
 def sendLocation(wo):
-    """Send the WO's location to Apeksha: the preview (as the location card shows it), then the
-    Google Maps link on the next line."""
+    """Post the WO's Google Maps link to Apeksha (only when Apeksha is on in Settings)."""
+    from .apeksha import mapsLink
+    from .config import apekshaEnabled
+    if not apekshaEnabled:
+        raise WorkflowError("Apeksha is off (Settings → Web pages → Use Apeksha) - the QR icon shows a QR code instead.")
     record = getRecord(cleanWorkOrder(wo)) or {}
     lat, lon = latLong(record)
     if not (lat and lon):
         raise WorkflowError("No location saved for this WO, nothing to send.")
-    preview = f"WO: {record.get('wo') or cleanWorkOrder(wo)}\nGrid Key: {record.get('gridKey') or ''}\nLocation: {lat}, {lon}"
-    reply = shareLocation(lat, lon, preview=preview)
+    reply = shareLocation(lat, lon)
     if reply.get("duplicate"):
-        return f"Location {lat} {lon} is already the newest on Apeksha - nothing new saved."
-    return f"Sent to Apeksha: the preview, then the Maps link ({lat}, {lon}) ✓"
+        return f"{mapsLink(lat, lon)} is already the newest on Apeksha - nothing new saved."
+    return f"Sent the Maps link to Apeksha ({lat}, {lon}) ✓"
 
 
 # ---------- Close ----------

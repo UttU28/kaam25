@@ -115,9 +115,7 @@ export default {
       label: "WO under test",
       placeholder: "The WO you're driving (picked automatically)",
       compact: true,
-      tools: `<button class="iconBtn sm copyPreview" title="Copy the preview (WO / Grid Key / Location)">${icon("copy", "sm")}</button>
-        <button class="iconBtn sm sendPreview" title="Send the preview and a Maps link to Apeksha">${icon("navigate", "sm")}</button>
-        <span class="sep"></span>`,
+      preview: true,
       picker: {
         label: "Today's open", empty: "No open tickets today.",
         load: async () => (await api("/api/end/open?all=1")).map((r) => ({
@@ -133,40 +131,6 @@ export default {
       onEnter: () => {},
     });
     q(".woSlot").replaceWith(box.el);
-    box.el.style.setProperty("--tools", 4);
-
-    // Copy / send the preview (WO / Grid Key / Location), like the Records page.
-    const tick = (button, ok) => {
-      button.classList.remove("done", "failed");
-      button.classList.add(ok ? "done" : "failed");
-      const was = button.innerHTML;
-      button.innerHTML = icon(ok ? "check" : "x", "sm");
-      setTimeout(() => { button.classList.remove("done", "failed"); button.innerHTML = was; }, 1400);
-    };
-    const previewText = () => record?.locationPreview ||
-      (wo ? `WO: ${wo}
-Grid Key: ${record?.gridKey || ""}
-Location: ${record?.location || ""}` : "");
-    $(".copyPreview", box.el).addEventListener("click", async (e) => {
-      const button = e.currentTarget, text = previewText();
-      if (!text) { toast("Pick a WO first.", "warn"); return; }
-      const ok = await copyText(text);
-      tick(button, ok);
-      toast(ok ? "Preview copied." : "Couldn't copy the preview.", ok ? "ok" : "bad");
-    });
-    $(".sendPreview", box.el).addEventListener("click", async (e) => {
-      const button = e.currentTarget;
-      if (!wo) { toast("Pick a WO first.", "warn"); return; }
-      if (!record?.hasLocation) { toast("No location saved for this WO.", "warn"); return; }
-      button.disabled = true;
-      try {
-        const data = await api(`/api/records/${enc(wo)}/location`, { method: "POST" });
-        tick(button, true); toast(data.message || "Sent to Apeksha.", "ok");
-      } catch (error) {
-        tick(button, false); toast(`Couldn't send to Apeksha: ${error.message}`, "bad", 8000);
-      } finally { button.disabled = false; }
-    });
-
     // ---------- WO and its saved tests ----------
     // Once TEMS has made the WO's result file (GridSummary), its speed results are done with: not shown.
     const finished = () => Boolean(record?.resultReady);
@@ -356,6 +320,17 @@ Location: ${record?.location || ""}` : "");
       paintPhones();
     }
 
+    // Each step of a test as a short pop-up (airplane on / off, Service Mode opening / opened,
+    // split set, speed test started / result...). Only the newest few stay on screen.
+    function stepToast(text) {
+      const clean = String(text).replace(/^\[([^\]]+)\]\s*/, "$1: ");
+      const kind = /warning|failed|no speed|no internet|didn't|not found/i.test(clean) ? "warn"
+        : /ready|done:|back online|split set|opened|reusing/i.test(clean) ? "ok" : "info";
+      toast(clean.replace(/^WARNING:\s*/i, ""), kind, 4500);
+      const steps = [...document.querySelectorAll("#toasts .toast")];
+      steps.slice(0, Math.max(0, steps.length - 3)).forEach((node) => node.remove());
+    }
+
     async function run(action, phone) {
       if (busy) return;
       busy = true;
@@ -363,12 +338,14 @@ Location: ${record?.location || ""}` : "");
       pending = action === "fullTestAll" ? (info?.phones || []).filter((p) => p.connected).map((p) => p.name)
         : action === "fullTest" || action === "speedtest" ? [phone] : [];  // desk / airplane: no speed to wait for
       paintPhones();
-      let seen = 0;
+      let seen = 0, linesShown = 0;
       const runWo = wo;
       try {
         const { job: started } = await api("/api/live/run", { body: { action, phone, wo } });
         let ordered = false;
         const done = await job.run(started, (j) => {
+          (j.lines || []).slice(linesShown).forEach((line) => stepToast(line.text));
+          linesShown = (j.lines || []).length;
           const results = j.data?.results || [];
           if (!ordered && j.data?.order) {  // Test all: the server picked the order (NR phones first, then LTE)
             ordered = true;

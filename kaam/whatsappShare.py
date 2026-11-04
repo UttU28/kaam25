@@ -23,15 +23,17 @@ def isRetryable(error):
 
 
 def sendTextOnWhatsApp(text, group, send=whatsappSend, retries=whatsappRetries, openUrl=openInChrome,
-                       startTimeout=40, timeout=3 * 60):
-    """A plain message (no file) to `group`: typed in its message box and sent. Every try first looks
-    in the chat for our own message with this text, so it never goes out twice. Returns (summary, wasSent)."""
+                       startTimeout=40, timeout=3 * 60, checkFirst=True):
+    """A plain message (no file) to `group` (a group or a person): typed in its message box and sent.
+    checkFirst: the first try looks in the chat for our own message with this text and doesn't send
+    it again (a retry always looks). Returns (summary, wasSent)."""
     attempts = 1 + retries
     for attempt in range(1, attempts + 1):
         def buildUrl(requestId, attempt=attempt):
             return f"http://127.0.0.1:{bridgePort}/whatsapp#" + urllib.parse.urlencode({
                 "kaamId": requestId, "kaamGroup": group, "kaamCaption": "", "kaamText": text,
-                "kaamSend": "1" if send else "0", "kaamAttempt": str(attempt), "kaamCheckFirst": "1",
+                "kaamSend": "1" if send else "0", "kaamAttempt": str(attempt),
+                "kaamCheckFirst": "1" if checkFirst else "0",
             })
         try:
             message = runInChrome(buildUrl, openUrl=openUrl, startTimeout=startTimeout, timeout=timeout,
