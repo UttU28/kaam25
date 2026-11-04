@@ -98,9 +98,11 @@ ticketStoreFile = getPath("TICKET_STORE_FILE")
 
 # ---------- WhatsApp sharing ----------
 whatsappGroup = getSetting("WHATSAPP_GROUP").strip()
+# Second group: after the summary, "<WO> - Done" goes here (one message for End Tickets). Optional.
+whatsappWoGroup = (os.environ.get("WHATSAPP_GROUP_WO") or "").strip()
 whatsappSend = getBool("WHATSAPP_SEND")
 whatsappRetries = max(0, getInt("WHATSAPP_RETRIES"))
-# End: share on WhatsApp by itself once Find in Chrome / Upload got everything (default on).
+# End: share on WhatsApp by itself once End Ticket / Upload got everything (default on).
 # On: phones/PCs on the same WiFi can open the app at http://<this PC's IP>:5000.
 lanAccess = (os.environ.get("LAN_ACCESS") or "true").strip().lower() in ("1", "true", "yes", "on")
 whatsappAutoShare = (os.environ.get("WHATSAPP_AUTO_SHARE") or "true").strip().lower() in ("1", "true", "yes", "on")

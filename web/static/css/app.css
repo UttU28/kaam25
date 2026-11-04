@@ -124,6 +124,7 @@ kbd { font: 600 10.5px var(--sans); padding: 2px 6px; border-radius: 5px; backgr
 .cardHead { display: flex; align-items: center; gap: 10px; padding: 15px 18px 0; }
 .cardHead h2 { margin: 0; font-size: 14px; font-weight: 650; letter-spacing: .1px; }
 .cardHead .hint { color: var(--faint); font-size: 12px; }
+.cardHead .endAll { margin-left: auto; }
 .cardHead .actions { margin-left: auto; display: flex; gap: 8px; }
 .cardBody { padding: 14px 18px 18px; }
 .card.pad { padding: 18px; }
@@ -240,6 +241,16 @@ kbd { font: 600 10.5px var(--sans); padding: 2px 6px; border-radius: 5px; backgr
 /* ---------- WO box ---------- */
 .woBox .match { margin-top: 6px; min-height: 18px; }
 .pickerBtn { position: relative; }
+/* compact WO box: the list button sits inside the field, right of the clear button */
+.woBox.compact .insideTools { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); display: flex; align-items: center; gap: 2px; }
+.woBox.compact .insideTools .clear { position: static; transform: none; }
+.woBox.compact .inputWrap .input { padding-right: calc(var(--tools, 2) * 30px + 10px); }
+.woBox.compact .insideTools .pickerBtn { position: static; flex: none; }
+.woBox.compact .insideTools .pickerBtn .popover { top: calc(100% + 10px); right: -6px; }
+.woBox.compact .insideTools .sep { width: 1px; height: 18px; background: var(--border); margin: 0 3px; }
+.woBox.compact .insideTools .iconBtn.done { color: var(--green); }
+.woBox.compact .insideTools .iconBtn.failed { color: var(--red); }
+.woBox.compact .match:empty { display: none; }
 .popover {
   position: absolute; z-index: 40; top: calc(100% + 6px); right: 0; width: min(560px, 92vw); max-height: 420px; overflow: auto;
   background: #141820; border: 1px solid var(--borderStrong); border-radius: 12px; box-shadow: var(--shadow); padding: 6px;
@@ -697,12 +708,28 @@ table.sheet td.num { color: var(--faint); width: 1%; }
 
 /* ---------- Live Testing (made to work in half a screen) ---------- */
 .liveTop .pair, .btnGrid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; }
+.liveTop .pair { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .btnGrid { gap: 8px; }
 .liveTop .pair .btn, .btnGrid .btn { width: 100%; min-width: 0; }
 .btnGrid .btn span, .liveTop .pair .btn span { overflow: hidden; text-overflow: ellipsis; }
 .liveHint { font-size: 12px; color: var(--faint); }
 .liveGrid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; }
-@media (max-width: 620px) { .liveGrid, .liveTop .pair, .techSummary { grid-template-columns: minmax(0, 1fr); } }
+/* The page sizes itself from its own width (half screen, full screen, tablet either way round) */
+.livePage { container: live / inline-size; }
+.liveTopRow { display: grid; gap: 10px; }
+.liveMain { display: grid; gap: 14px; }
+@container live (min-width: 900px) {
+  .liveTopRow { grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); align-items: start; }
+  .liveTopRow .pair { margin-top: 22px; }  /* level with the WO box (under its label) */
+}
+@container live (min-width: 980px) {
+  /* wide: map on the left, phones stacked on the right */
+  .liveMain { grid-template-columns: minmax(0, 1.55fr) minmax(320px, 1fr); align-items: start; }
+  .liveMain .liveGrid { grid-template-columns: minmax(0, 1fr); }
+  .liveMain .tmMap { height: clamp(420px, calc(100vh - 290px), 900px); }
+}
+@container live (max-width: 640px) { .liveGrid, .techSummary { grid-template-columns: minmax(0, 1fr); } }
+@container live (max-width: 520px) { .liveTop .pair { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } .liveTop .pair .btn:last-child { grid-column: 1 / -1; } }
 .phoneCard .cardBody { display: flex; flex-direction: column; gap: 12px; }
 .phoneHead { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .phoneHead h2 { margin: 0; display: flex; align-items: center; gap: 6px; }
@@ -726,3 +753,47 @@ table.sheet td.num { color: var(--faint); width: 1%; }
 .liveWo .kv { grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); }
 .btnGrid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .btnGrid.three .btn { padding: 0 10px; }
+
+/* Live Testing: compact phone cards (fit half a screen), buttons icon over label so nothing is cut */
+.phoneCard .cardBody { gap: 8px; }
+.phoneCard .netLine:empty { display: none; }
+.btnGrid.three .btn { flex-direction: column; gap: 2px; height: 50px; padding: 4px 6px; font-size: 12.5px; line-height: 1.2; }
+.btnGrid.three .btn span { max-width: 100%; white-space: nowrap; }
+.liveTop .cardBody.stack { gap: 10px; }
+
+/* Live Testing: TEMS map (drawn like TEMS's Map page) */
+.temsMap { overflow: hidden; isolation: isolate; }  /* keeps the map under the sticky page header */
+.tmHead { display: flex; align-items: center; gap: 8px; padding: 10px 14px 6px; flex-wrap: wrap; }
+.tmHead .tmWo { font-size: 12.5px; color: var(--text); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tmTools { display: flex; align-items: center; gap: 6px; padding: 0 14px 10px; flex-wrap: wrap; border-bottom: 1px solid var(--border); }
+.tmTools .btn.on { background: var(--accentSoft); color: var(--accent); border-color: var(--accent); }
+.tmTools .tmKey { margin-left: auto; font-size: 11.5px; color: var(--muted); }
+.liveDot { width: 9px; height: 9px; border-radius: 50%; background: var(--faint); flex: none; }
+.liveDot.on { background: var(--green); box-shadow: 0 0 0 3px var(--greenSoft); }
+.liveDot.off { background: var(--red); }
+.tmBody { position: relative; }
+.tmMap { height: clamp(280px, 46vh, 520px); background: #f2f1ef; }
+.tmMap.leaflet-container { font: inherit; }
+.tmCanvas { position: absolute; top: 0; left: 0; pointer-events: none; }
+.bingLike { filter: brightness(1.03) contrast(1.05); }
+.tmMsg { position: absolute; left: 12px; right: 12px; bottom: 12px; z-index: 500; padding: 8px 12px; border-radius: 8px;
+  background: rgba(20, 24, 32, .92); color: var(--text); font-size: 12.5px; }
+
+/* Live Testing: live signal strip per phone */
+.phoneCard { container: phone / inline-size; }
+.sigGrid { display: grid; grid-template-columns: minmax(0, 1.4fr) repeat(4, minmax(0, 1fr)); gap: 4px; }
+@container phone (max-width: 400px) {
+  .sigGrid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .sig.rsrp { grid-column: 1 / -1; }
+}
+.sig.rsrp .v { font-size: 26px; line-height: 1.1; }
+.sig .k .liveDot { width: 7px; height: 7px; margin-left: auto; }
+.sig .k .liveDot.on { box-shadow: 0 0 0 2px var(--greenSoft); }
+.sig { background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: 5px 6px; min-width: 0; }
+.sig .k { font-size: 10px; font-weight: 700; letter-spacing: .5px; color: var(--faint); display: flex; align-items: center; gap: 4px; }
+.sig .v { font: 700 14px/1.2 var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+.sig.good .v { color: var(--green); }
+.sig.ok .v { color: var(--accent); }
+.sig.weak .v { color: var(--amber); }
+.sig.bad .v { color: var(--red); }
+.sigMeta { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); margin-top: 4px; }

@@ -16,7 +16,7 @@ const navItems = [
   ["Work", null],
   ["today", "Today", "today", "var(--accent)"],
   ["start", "Start Ticket", "rocket", "var(--accent)", "toStart"],
-  ["live", "Live Testing", "gauge", "var(--green)"],
+  ["live", "Live Testing", "gauge", "var(--green)", "driving"],
   ["end", "End Ticket", "end", "var(--green)", "open"],
   ["close", "Close Ticket", "lock", "var(--amber)", "readyToClose"],
   ["maps", "Maps", "map", "var(--green)"],
@@ -33,7 +33,7 @@ function renderNav() {
   $("#nav").innerHTML = navItems.map(([key, label, ico, color, countKey]) => label === null
     ? `<div class="navSection">${key}</div>`
     : `<a href="#/${key}" data-page="${key}" title="${label}" class="${key === currentName ? "active" : ""}" style="--navColor:${color}">
-         ${icon(ico)}<span>${label}</span>${countKey && counts[countKey] ? `<span class="count ${key === "end" ? "hot" : ""}">${counts[countKey]}</span>` : ""}</a>`).join("");
+         ${icon(ico)}<span>${label}</span>${countKey && counts[countKey] ? `<span class="count ${key === "end" || key === "live" ? "hot" : ""}">${counts[countKey]}</span>` : ""}</a>`).join("");
 }
 
 function renderFoot() {

@@ -6,16 +6,23 @@ const matchedNames = { gridKey: "Grid key", ticketId: "Ticket ID", excelWo: "The
 // ---------- WO box ----------
 // opts: label, placeholder, picker {label, empty, load: async () => [{wo, title, sub, badge}]},
 //       onResolve(wo, record, matchedBy), onEnter(wo)
+//       compact: true - no Copy button, the picker is a small list button inside the box
+//       tools: extra icon buttons (html) inside a compact box, left of the list button
 export function woBox(opts = {}) {
-  const el = h(`<div class="field woBox">
+  const pickerHtml = !opts.picker ? ""
+    : opts.compact
+      ? `<div class="pickerBtn"><button class="iconBtn sm pick" title="${esc(opts.picker.label)}">${icon("chevron", "sm")}</button></div>`
+      : `<div class="pickerBtn"><button class="btn btnGhost pick" title="${esc(opts.picker.label)}">${icon("list", "sm")}<span class="pickLabel">${esc(opts.picker.label)}</span>${icon("chevron", "sm")}</button></div>`;
+  const el = h(`<div class="field woBox ${opts.compact ? "compact" : ""}">
       <label class="label">${esc(opts.label || "WO")}</label>
       <div class="inputGroup">
         <div class="inputWrap">
           <input class="input mono" spellcheck="false" autocomplete="off" placeholder="${esc(opts.placeholder || "Paste a WO, grid key or Ticket ID")}">
-          <button class="iconBtn sm clear hidden" title="Clear">${icon("x", "sm")}</button>
+          ${opts.compact
+            ? `<div class="insideTools"><button class="iconBtn sm clear hidden" title="Clear">${icon("x", "sm")}</button>${opts.tools || ""}${pickerHtml}</div>`
+            : `<button class="iconBtn sm clear hidden" title="Clear">${icon("x", "sm")}</button>`}
         </div>
-        <button class="btn btnGhost copyBtn" title="Copy the WO">${icon("copy", "sm")}<span>Copy</span></button>
-        ${opts.picker ? `<div class="pickerBtn"><button class="btn btnGhost pick" title="${esc(opts.picker.label)}">${icon("list", "sm")}<span class="pickLabel">${esc(opts.picker.label)}</span>${icon("chevron", "sm")}</button></div>` : ""}
+        ${opts.compact ? "" : `<button class="btn btnGhost copyBtn" title="Copy the WO">${icon("copy", "sm")}<span>Copy</span></button>${pickerHtml}`}
       </div>
       <div class="match note"></div>
     </div>`);
@@ -54,7 +61,7 @@ export function woBox(opts = {}) {
     opts.onEnter?.(cleanWo(input.value));
   });
   clear.addEventListener("click", () => { input.value = ""; resolve(); input.focus(); });
-  $(".copyBtn", el).addEventListener("click", (event) => {
+  $(".copyBtn", el)?.addEventListener("click", (event) => {
     const wo = cleanWo(input.value);
     if (wo) copyWithFlash(event.currentTarget, wo); else toast("Nothing to copy - the WO box is empty.", "warn");
   });

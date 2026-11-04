@@ -89,7 +89,7 @@ ticketFields = (
     "ticketId", "startTicketId", "endTicketId", "ticketVerified", "startedAt", "submitted", "driveShift",
     "startType", "localGridNumber",
     "folderName", "endedAt", "eq3", "eq6", "status", "totalGrids", "attempted", "skipped", "remarks",
-    "gridSummaryPath", "whatsappSentAt", "closeStep1At", "closeStep2At", "closeStep3At", "closedAt", "speedTests",
+    "gridSummaryPath", "whatsappSentAt", "woDoneSentAt", "closeStep1At", "closeStep2At", "closeStep3At", "closedAt", "speedTests",
 )
 
 

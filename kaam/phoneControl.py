@@ -258,10 +258,11 @@ def runSpeedtest(serial, timeout=180):
     """Starts a speed test and waits for its result: {download, ping, pingLoaded, resultId}."""
     name = phoneName(serial)
     before = evalOnSpeedtest(serial, speedtestResultScript) or {}
+    # What the phone is latched to, read just before GO: once the gauge moves, the screen can't be read.
+    network = readNetworkSettled(serial)
+    say(f"[{name}] on {networkText(network)}")
     if not startSpeedtest(serial):
         raise RuntimeError("Could not start the speed test.")
-    network = readNetworkSettled(serial)  # what the phone is latched to while the test runs
-    say(f"[{name}] on {networkText(network)}")
     say(f"[{name}] waiting for the result…")
     end = time.time() + timeout
     while time.time() < end:
@@ -366,12 +367,13 @@ screenLocks = {}  # serial -> lock: two screen dumps at once on one phone make o
 screenLocksGuard = threading.Lock()
 
 
-def dumpScreen(serial):
-    """The phone's screen as uiautomator XML (both halves of a split screen); '' if it can't be read."""
+def dumpScreen(serial, tries=3):
+    """The phone's screen as uiautomator XML (both halves of a split screen); '' if it can't be read.
+    A read waits for the screen to be still, so it can take ~10 s (and fail) while something moves."""
     with screenLocksGuard:
         lock = screenLocks.setdefault(serial, threading.Lock())
     with lock:
-        for _ in range(3):
+        for _ in range(tries):
             dump = adbShell(serial, "uiautomator dump --windows /sdcard/kaamUi.xml >/dev/null && cat /sdcard/kaamUi.xml")
             if "<hierarchy" in dump or "<displays" in dump:
                 return dump
@@ -465,15 +467,17 @@ def openActiveSim(serial, waitSeconds=5):
 
 # ---------- which network the phone is on (NR / LTE / none) ----------
 
-def serviceModeLines(serial):
+def serviceModeLines(serial, tries=3):
     """The text lines Service Mode shows right now ([] when it isn't on screen)."""
-    dump = dumpScreen(serial)
+    dump = dumpScreen(serial, tries)
     return [html.unescape(text).strip() for text in
             re.findall(r'<node [^>]*?text="([^"]+)"[^>]*?package="com\.sec\.android\.RilServiceModeApp"', dump)]
 
 
-def network(tech, band="", pci="", rsrp="", sinr="", source=""):
-    return {"tech": tech, "band": band, "pci": pci, "rsrp": rsrp, "sinr": sinr, "source": source}
+def network(tech, band="", pci="", rsrp="", sinr="", source="", rsrq="", arfcn="", bw=""):
+    """bw: the serving carrier's downlink bandwidth in MHz ("20", "100")."""
+    return {"tech": tech, "band": band, "pci": pci, "rsrp": rsrp, "sinr": sinr, "rsrq": rsrq, "arfcn": arfcn,
+            "bw": bw, "source": source}
 
 
 def parseServiceMode(lines):
@@ -490,25 +494,79 @@ def parseServiceMode(lines):
     serving = find(r"Serving PLMN\([\d-]+\)-(\w+)").upper()
     if serving.startswith("NR"):
         return network("NR", find(r"NR_BAND\s*:\s*(n?\d+)"), find(r"NR_PCI\s*:\s*(\d+)"),
-                       find(r"NR5G_RSRP\s*:\s*(-?[\d.]+)"), find(r"NR5G_SINR\s*:\s*(-?[\d.]+)"), "serviceMode")
+                       find(r"NR5G_RSRP\s*:\s*(-?[\d.]+)"), find(r"NR5G_SINR\s*:\s*(-?[\d.]+)"), "serviceMode",
+                       find(r"NR5G_RSRQ\s*:\s*(-?[\d.]+)"), find(r"NR_ARFCN\s*:\s*(\d+)"),
+                       find(r"NR\w*?_?BW\s*:\s*(\d+)"))
     if serving == "LTE":
         band = find(r"(?:^|\s)BAND\s*:\s*(\d+)")
         return network("LTE", f"B{band}" if band else "", find(r"Earfcn:\s*\d+,\s*PCI:\s*(\d+)"),
-                       find(r"(?:^|\s)RSRP\s*:\s*(-?\d+)"), find(r"(?:^|\s)SNR\s*:\s*(-?[\d.]+)"), "serviceMode")
+                       find(r"(?:^|\s)RSRP\s*:\s*(-?\d+)"), find(r"(?:^|\s)SNR\s*:\s*(-?[\d.]+)"), "serviceMode",
+                       find(r"(?:^|\s)RSRQ\s*:\s*(-?[\d.]+)"), find(r"Earfcn:\s*(\d+)"),
+                       find(r"(?:^|\s)BW\s*:\s*(\d+)"))
     if re.search(r"no service|out of service|OUT_OF_SERVICE|Service\((?!available)", text, re.I):
         return network("No service", source="serviceMode")
     return None
 
 
+def androidBandwidth(configs, tech):
+    """Serving carrier's downlink bandwidth (MHz) from mPhysicalChannelConfigs, for NR or LTE."""
+    want = "NR" if tech == "NR" else "LTE"
+    best = ""
+    for config in re.findall(r"\{[^{}]*mCellBandwidthDownlinkKhz=\d+[^{}]*\}", configs):
+        khz = re.search(r"mCellBandwidthDownlinkKhz=(\d+)", config)
+        kind = re.search(r"mNetworkType=(\w+)", config)
+        if not khz or int(khz.group(1)) in (0, 2147483647) or not kind or not kind.group(1).startswith(want):
+            continue
+        mhz = str(round(int(khz.group(1)) / 1000))
+        if "PrimaryServing" in config:
+            return mhz
+        best = best or mhz
+    return best
+
+
 def networkFromAndroid(serial):
-    """Fallback without Service Mode: the in-service SIM slot's radio (NR / LTE), no band or signal."""
-    text = adbShell(serial, "dumpsys telephony.registry | grep -m2 'mServiceState='")
-    for line in text.splitlines():
-        if "mDataRegState=0(IN_SERVICE)" in line:
-            radio = re.search(r"getRilDataRadioTechnology=\d+\((\w+)\)", line)
-            name = radio.group(1) if radio else ""
-            return network("NR" if name.startswith("NR") else "LTE" if name.startswith("LTE") else "Unknown",
-                           source="android")
+    """Without Service Mode (fast, ~0.2 s, never waits for the screen): the in-service SIM's radio
+    (NR / LTE), band, bandwidth, RSRP, SINR, RSRQ and channel from Android's telephony registry
+    (it hides the PCI)."""
+    text = adbShell(serial, "dumpsys telephony.registry | grep -E "
+                            "'Phone Id=|mServiceState=|mSignalStrength=|mCellIdentity=|mPhysicalChannelConfigs='")
+    # One block per SIM ("Phone Id=0", "Phone Id=1"); older phones: one block.
+    blocks, block = [], []
+    for line in (line.strip() for line in text.splitlines()):
+        if line.startswith("Phone Id=") and block:
+            blocks.append(block)
+            block = []
+        block.append(line)
+    blocks.append(block)
+
+    def find(pattern, where):
+        found = re.search(pattern, where)
+        value = found.group(1) if found else ""
+        return "" if value in ("2147483647", "-2147483648") else value
+
+    for lines in blocks:
+        state = next((x for x in lines if x.startswith("mServiceState=") and "mDataRegState=0(IN_SERVICE)" in x), "")
+        if not state:
+            continue
+        radio = re.search(r"getRilDataRadioTechnology=\d+\((\w+)\)", state)
+        name = radio.group(1) if radio else ""
+        tech = "NR" if name.startswith("NR") else "LTE" if name.startswith("LTE") else "Unknown"
+        signal = next((x for x in lines if x.startswith("mSignalStrength=")), "")
+        cell = next((x for x in lines if x.startswith("mCellIdentity=")), "")
+        configs = next((x for x in lines if x.startswith("mPhysicalChannelConfigs=")), "")
+        bands = find(r"mBands\s*=\s*\[(\d+)", cell)
+        channel = find(r"mChannelNumber=(\d+)", state)
+        bw = androidBandwidth(configs, tech)
+        if tech == "NR":
+            nr = signal.split("mNr=", 1)[-1]
+            return network("NR", f"n{bands}" if bands else "", "", find(r"ssRsrp = (-?\d+)", nr),
+                           find(r"ssSinr = (-?\d+)", nr), "android", find(r"ssRsrq = (-?\d+)", nr), channel, bw)
+        lte = signal.split("mLte=", 1)[-1]
+        if not bw:
+            khz = find(r"mBandwidth=(\d+)", cell)
+            bw = str(round(int(khz) / 1000)) if khz else ""
+        return network(tech, f"B{bands}" if bands else "", "", find(r"rsrp=(-?\d+)", lte),
+                       find(r"rssnr=(-?\d+)", lte), "android", find(r"rsrq=(-?\d+)", lte), channel, bw)
     return network("No service", source="android")
 
 
@@ -539,7 +597,7 @@ def networkText(found):
     """'NR n41 · PCI 602 · RSRP -102 · SINR 13.0' style one-liner."""
     if not found:
         return "Unknown"
-    parts = [" ".join(p for p in (found.get("tech"), found.get("band")) if p)]
+    parts = [" ".join(p for p in (found.get("tech"), found.get("band"), found.get("bw") and f"{found['bw']} MHz") if p)]
     parts += [f"{label} {found[key]}" for key, label in (("pci", "PCI"), ("rsrp", "RSRP"), ("sinr", "SINR")) if found.get(key)]
     return " · ".join(parts)
 

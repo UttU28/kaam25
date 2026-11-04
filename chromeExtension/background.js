@@ -8,7 +8,7 @@ const extensionVersion = chrome.runtime.getManifest().version;
 
 // Keep equal to "version" in manifest.json. Chrome can keep running an old saved copy of this
 // file after an update (seen across a Chrome restart); when it does, reload to get the new code.
-const backgroundBuild = "3.30";
+const backgroundBuild = "3.33";
 if (extensionVersion !== backgroundBuild) chrome.runtime.reload();
 
 // Sends to the app. If the app says our files changed on disk, reload to pick them up.
@@ -520,8 +520,11 @@ async function handleMessage(message, sender) {
       }
       // Start Ticket's work (TEMS check / Reserve + Open, creating or finding the ticket) leaves you
       // where it ends - only End / Close work (uploads, WhatsApp, closing a ticket) switches back.
+      // TEMS Reserve + Open done (its Map page is showing): back to the app, which opens Live Testing.
       const startWork = job.kind === "tems" || (job.kind === "ticket" && (job.data || {}).mode !== "close");
-      if (startWork) cancelFocusApp();
+      if (job.kind === "tems" && result.backToApp && result.ok) focusAppSoon(1500);
+      else if (startWork) cancelFocusApp();
+      else if (job.kind === "whatsapp" && result.ok) focusAppSoon(1500);  // shared: straight back to the app
       else if (!result.error && result.ok !== false) focusAppSoon();
       return true;
     }

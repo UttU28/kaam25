@@ -244,7 +244,46 @@
   // Only used to see when the list stops changing.
   const assignmentCount = () => (textOf(content()).match(/\b(In Progress|Planned|Completed)\b/g) || []).length;
 
+  // Live Testing's Start ticket: Control page, then its play button - only when the app says TEMS
+  // has the WO Validated / Paused (canPlay); while it runs, the same button would pause it.
+  const playOnControl = async () => {
+    const { canPlay = false } = job.data || {};
+    const control = await waitFor(() => menuButton("Control"), appWaitMs);
+    if (!control) return finish({ ok: false, error: `TEMS Paragon didn't load at ${location.origin}. Is TEMS Paragon running?` });
+    if (!isSelected(control)) {
+      debugLog("opening Control");
+      control.click();
+      if (!(await waitFor(() => isSelected(menuButton("Control")), 3000))) await realClick(menuButton("Control") || control);
+    }
+    const controlShown = !!(await waitFor(() => isSelected(menuButton("Control")), 5000));
+    const playButton = () => {
+      const box = [...document.querySelectorAll('[class*="WorkOrderControl_container"]')].find(isVisible);
+      const buttons = box ? [...box.querySelectorAll('[class*="WorkOrderControl_button"]')].filter(isVisible) : [];
+      const main = buttons[buttons.length - 1];  // an error button, if any, comes first
+      return main ? main.closest('button, [role="button"]') || main : null;
+    };
+    const button = await waitFor(playButton, 10000);
+    if (!button) return finish({ ok: false, controlShown, error: "TEMS Control is open, but its play button isn't there (no WO open?)." });
+    if (!canPlay) return finish({ ok: true, controlShown, played: false, summary: "TEMS Control is open - play isn't ready yet, so it wasn't pressed." });
+    if (!isEnabled(button)) return finish({ ok: true, controlShown, played: false, summary: "TEMS Control is open, but its play button is greyed out - not pressed." });
+    debugLog("pressing play on Control");
+    await realClick(button);
+    // TEMS asks to confirm ("Do not attempt to adjust this device while driving..." -> I understand;
+    // a pinpoint warning -> OK).
+    const inPopup = (el) => !!el.closest('[role="dialog"], [class*="Notification" i], [class*="Prompt" i], [class*="Dialog" i], [class*="Modal" i]');
+    const confirmButton = () => [...document.querySelectorAll('button, [role="button"]')]
+      .find((el) => isVisible(el) && (/^i understand$/i.test(textOf(el)) || (/^ok$/i.test(textOf(el)) && inPopup(el))));
+    const confirm = await waitFor(confirmButton, 6000, 250);
+    if (confirm) {
+      debugLog(`confirming: ${textOf(confirm)}`);
+      await realClick(confirm);
+      await waitFor(() => !confirmButton(), 4000);
+    }
+    finish({ ok: true, controlShown, played: true, summary: `TEMS: play pressed on Control${confirm ? ` (${textOf(confirm)})` : ""}.` });
+  };
+
   try {
+    if ((job.data || {}).action === "play") { await playOnControl(); return; }
     // 1. TEMS Paragon loaded, then the Cloud tab.
     const cloud = await waitFor(() => menuButton("Cloud"), appWaitMs);
     if (!cloud) {
@@ -499,7 +538,16 @@
       const opened = await press(openButton, () => !openButton.isConnected || !isVisible(openButton) ||
         !assignDetailsShowWo(name) || isSelected(menuButton("Control")), label);
       done.push(opened ? `${label} clicked on Assign` : `${label} clicked on Assign (no visible change yet)`);
-      finish({ ok: true, found: spot.where, matchedWo: name, reserved: !!cloudRow, opened,
+      // Then TEMS's Map page, so the drive shows there (the app's Live Testing draws the same map).
+      let mapShown = false;
+      await waitFor(() => isSelected(menuButton("Control")) || !openButton.isConnected, 8000);
+      const mapButton = await waitFor(() => menuButton("Map"), 8000);
+      if (mapButton) {
+        if (!isSelected(mapButton)) await clickAndWait(mapButton, () => isSelected(menuButton("Map")));
+        mapShown = isSelected(menuButton("Map"));
+        done.push(mapShown ? "Map page open" : "Map clicked");
+      } else debugLog("no Map button in the side menu");
+      finish({ ok: true, found: spot.where, matchedWo: name, reserved: !!cloudRow, opened, mapShown, backToApp: true,
         summary: `TEMS: ${name} - ${done.join(", then ")}.` });
       return;
     }

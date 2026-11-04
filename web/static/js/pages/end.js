@@ -1,6 +1,6 @@
 // End: find + verify the ticket (cloud) or skip that (local), copy GridSummary, upload EQ3/EQ6,
 // build the report, save it, share it on WhatsApp, mark the ticket done.
-import { $, api, copyText, copyWithFlash, enc, esc, flash, formatReport, icon, onDataChange, refreshState, setWhatsappSend, store, toast } from "../core.js";
+import { $, api, copyText, copyWithFlash, enc, esc, flash, formatReport, icon, modal, onDataChange, refreshState, setWhatsappSend, store, toast } from "../core.js";
 import { jobPanel, locationCard, seg, switchEl, woBox } from "../components.js";
 
 export default {
@@ -10,11 +10,14 @@ export default {
     const settings = store.settings || {};
     const defaults = settings.defaults || { total: "1", attempted: "1", skipped: "0", status: "PASSED" };
     let record = null, loadedKey = null, busy = false;
+    let shownKey = "";     // the WO the form is showing; a different one clears everything first
+    let nextMsg = null;    // message to show once the new WO is in (it would be cleared otherwise)
 
     root.innerHTML = `
       <div class="grid cols2" style="align-items:start">
         <div class="card">
-          <div class="cardHead"><h2>Details</h2><span class="hint">Enter in the WO box runs it</span></div>
+          <div class="cardHead"><h2>Details</h2><span class="hint">Enter in the WO box runs it</span>
+            <button class="btn btnGreen sm endAll hidden" title="Every WO in Today's open: all uploads first, then the WhatsApp shares one by one (only the ones that ended and weren't shared yet)">${icon("check", "sm")}<span class="endAllLabel">End Tickets</span></button></div>
           <div class="cardBody stack">
             <div class="woSlot"></div>
             <div class="field">
@@ -84,7 +87,7 @@ export default {
         load: async () => (await api("/api/end/open")).map((r) => ({
           wo: r.wo, title: r.wo, sub: `${r.ticketId || "no ticket ID"}${r.startType === "local" ? " · local" : ""}`,
         })),
-        onPick: () => msg(`Picked from today's open tickets. Press Enter (or ${runLabel()}) to continue.`, "info"),
+        onPick: () => { nextMsg = [`Picked from today's open tickets. Press Enter (or ${runLabel()}) to continue.`, "info"]; },
       },
       onResolve: (wo, rec) => { record = rec; onWo(wo); },
       onEnter: () => run(),
@@ -118,7 +121,7 @@ export default {
       };
     }
     const isLocal = () => record?.startType === "local";
-    const runLabel = () => (isLocal() ? "Upload" : "Find in Chrome");
+    const runLabel = () => (isLocal() ? "Upload" : "End Ticket");
 
     function hint(text, color = "var(--faint)") {
       q(".savedHint").textContent = text;
@@ -156,7 +159,8 @@ export default {
       q(".report").textContent = formatReport(f);
       q(".fFolder").value = f.wo ? (record?.folderName && String(record.wo).replace(/\s+/g, "").toLowerCase() === String(f.wo).replace(/\s+/g, "").toLowerCase() ? record.folderName : folderName(f.wo)) : "";
       const run = q(".run");
-      run.innerHTML = isLocal() ? `${icon("upload", "sm")}<span>Upload</span>` : `${icon("search", "sm")}<span>Find in Chrome</span>`;
+      run.innerHTML = isLocal() ? `${icon("upload", "sm")}<span>Upload</span>` : `${icon("check", "sm")}<span>End Ticket</span>`;
+      q(".endAll").disabled = busy;
       run.disabled = busy || !f.wo;
       if (!f.wo) hint("");
       else if (!record) hint("Not in Records yet", "var(--amber)");
@@ -170,10 +174,23 @@ export default {
       return `${stamp}_${settings.employeeId || ""}_${settings.folderNamePrefix || ""}${wo}`;
     }
 
-    // A WO that's in Records: fill in what we know (ticket / EQ IDs only when empty).
+    // Back to a blank form: the defaults, nothing from the WO before.
+    function resetFields() {
+      Object.values(inputs).forEach((i) => (i.value = ""));
+      inputs.total.value = defaults.total; att.set(defaults.attempted); skip.set(defaults.skipped); status.set(defaults.status);
+      job.hide(); hint("");
+    }
+    // A different WO: clear everything from the one before, then fill in what Records has for it.
     function onWo(wo) {
       loc.show(wo, record);
       const key = (wo || "").replace(/\s+/g, "").toUpperCase();
+      if (key !== shownKey && !busy) {
+        const hadOne = Boolean(shownKey);
+        shownKey = key; loadedKey = null;
+        resetFields();
+        if (nextMsg) { msg(...nextMsg); nextMsg = null; }
+        else if (hadOne) msg(key ? "" : "Type the WO and press Enter to look up the Ticket ID.", "info");
+      }
       if (record && key && key !== loadedKey && !busy) {
         loadedKey = key;
         const filled = [];
@@ -242,6 +259,40 @@ export default {
     }
 
     q(".run").addEventListener("click", run);
+
+    // ----- End Tickets: every WO in Today's open, uploads first, then the WhatsApp shares -----
+    async function runAll() {
+      if (busy) return;
+      let open = [];
+      try { open = await api("/api/end/open"); } catch (error) { msg(error.message, "bad"); return; }
+      if (!open.length) { msg("Nothing to end - no open WO has its result file yet.", "info"); return; }
+      const list = open.slice().sort((a, b) => (a.startedAt || "").localeCompare(b.startedAt || ""));
+      const sendText = wa.get() ? "and sends each one on WhatsApp" : "and gets each one ready on WhatsApp (Send OFF: you press Send)";
+      const ok = await modal({
+        title: `End ${list.length} tickets?`,
+        body: `<p>Uploads everything for each WO first (ticket check, GridSummary, EQ uploads), then ${sendText} in
+          <b>${esc(settings.whatsappGroup || "the group")}</b>, one by one - only the WOs that ended fully and weren't shared yet.
+          ${settings.whatsappWoGroup ? `Then one message to <b>${esc(settings.whatsappWoGroup)}</b> with "&lt;WO&gt; - Done" for all of them.` : ""}</p>
+          <ol style="margin:8px 0 0 18px">${list.map((r) => `<li class="mono">${esc(r.wo)}</li>`).join("")}</ol>`,
+        buttons: [{ label: "Cancel", value: false }, { label: `End ${list.length} tickets`, value: true, cls: "btnGreen" }],
+      });
+      if (!ok) return;
+      busy = true; update();
+      msg(`Ending ${list.length} tickets - uploads first, then WhatsApp…`, "info");
+      try {
+        const { job: started } = await api("/api/end/runAll", { body: { send: wa.get() } });
+        const done = await job.run(started);
+        if (done.state === "done") msg(done.result.summary, done.result.ok ? "ok" : "warn");
+        else msg(done.state === "stopped" ? "Stopped by you." : done.error || "Stopped.", "bad");
+      } catch (error) {
+        msg(error.message, "bad");
+      } finally {
+        busy = false;
+        box.set(""); record = null; shownKey = ""; loadedKey = null;
+        await refreshState(); box.refreshPicker(); update();
+      }
+    }
+    q(".endAll").addEventListener("click", runAll);
     q(".saveEq").addEventListener("click", async (e) => {
       try {
         const r = await api("/api/end/eq", { body: { wo: box.get(), eq3: inputs.eq3.value, eq6: inputs.eq6.value } });
@@ -255,8 +306,8 @@ export default {
       catch (error) { msg(error.message, "bad"); }
     });
     async function copyReport(button) {
-      await copyText(q(".report").textContent);
-      flash(button || q(".copyReport"), true, "Copied");
+      const ok = await copyText(q(".report").textContent);
+      flash(button || q(".copyReport"), ok, ok ? "Copied" : "Copy failed");
       quietSave();
     }
     q(".copyReport").addEventListener("click", (e) => copyReport(e.currentTarget));
@@ -276,10 +327,8 @@ export default {
       finally { button.disabled = false; reloadRecord(); }
     }
     function clearForm() {
-      box.set(""); record = null; loadedKey = null;
-      Object.values(inputs).forEach((i) => (i.value = ""));
-      inputs.total.value = defaults.total; att.set(defaults.attempted); skip.set(defaults.skipped); status.set(defaults.status);
-      job.hide(); msg("Type the WO and press Enter to look up the Ticket ID.", "info"); update(); box.focus();
+      box.set(""); record = null; loadedKey = null; shownKey = "";
+      resetFields(); msg("Type the WO and press Enter to look up the Ticket ID.", "info"); update(); box.focus();
     }
     q(".clear").addEventListener("click", clearForm);
     q(".done").addEventListener("click", async () => {
@@ -307,15 +356,21 @@ export default {
       api("/api/end/open").then((open) => {
         if (box.get() || !open.length) return;
         const first = open.slice().sort((a, b) => (a.startedAt || "").localeCompare(b.startedAt || ""))[0];
+        nextMsg = [open.length > 1 ? `Picked the one you started first (${open.length} open). Press Enter (or ${runLabel()}) to continue.`
+          : `Picked today's open WO. Press Enter (or ${runLabel()}) to continue.`, "info"];
         box.set(first.wo);
-        msg(open.length > 1 ? `Picked the one you started first (${open.length} open). Press Enter (or ${runLabel()}) to continue.`
-          : `Picked today's open WO. Press Enter (or ${runLabel()}) to continue.`, "info");
       }).catch(() => {});
     }
     setTimeout(() => box.focus(), 50);
 
     // ----- live: count from the shared state; the record (and an open list) when data changes -----
-    const paintCount = (state) => box.setPickerCount(state?.counts?.open || 0);
+    const paintCount = (state) => {
+      const count = state?.counts?.open || 0;
+      box.setPickerCount(count);
+      const button = q(".endAll");
+      button.classList.toggle("hidden", count < 2);
+      $(".endAllLabel", button).textContent = `End ${count} Tickets`;
+    };
     paintCount(store.state);
     const offCount = store.on(paintCount);
     const offData = onDataChange(async () => {

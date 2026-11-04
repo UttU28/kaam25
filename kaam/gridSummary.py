@@ -10,6 +10,7 @@ match a different day.
 
 import os
 import re
+import time
 import shutil
 import subprocess
 from datetime import datetime
@@ -57,6 +58,24 @@ def findWorkOrderFolder(wo, baseDir=workOrderOutputDir):
     if not candidates:
         raise GridSummaryError(f"No folder for {wo} in {baseDir}")
     return max(candidates)[3]
+
+
+readyCache = {}  # wo -> (checkedAt, ready)
+
+
+def resultReady(wo, cacheSeconds=5):
+    """True once TEMS has written this WO's result - GridSummary.csv in its newest run folder, or
+    our renamed copy of it. Until then the WO is still being driven (Live Testing), not ready to End."""
+    hit = readyCache.get(wo)
+    if hit and time.time() - hit[0] < cacheSeconds:
+        return hit[1]
+    try:
+        runFolder = findLatestRunFolder(findWorkOrderFolder(wo))
+        ready = (runFolder / gridSummaryFile).is_file() or             any(runFolder.glob(f"*_{employeeId}_{folderNamePrefix}{wo}.csv"))
+    except Exception:
+        ready = False
+    readyCache[wo] = (time.time(), ready)
+    return ready
 
 
 def copyGridSummary(wo):

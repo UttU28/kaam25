@@ -9,6 +9,9 @@
   window.kaamShareRunning = job.requestId;
   const { group, caption, send } = job.data;
   const attempt = job.data.attempt || 1;
+  // Look in the chat for this WO's file before sending: on a retry (the try before may have sent
+  // it without hearing back) and when the app asks (End Tickets: only what wasn't shared yet).
+  const checkFirst = attempt > 1 || !!job.data.checkFirst;
   const replacedError = "replaced by a newer share";
   const stopIfReplaced = () => {
     if (window.kaamShareRunning !== job.requestId) throw new Error(replacedError);
@@ -176,7 +179,7 @@
     const main = document.querySelector("#main");
     await waitFor(() => main.querySelector('[role="row"], [data-id], .message-in, .message-out'), 30000);
     await waitFor(() => !isLoadingShown(main), 60000, 1000);
-    await waitForQuiet(main, 2500, 45000);
+    await waitForQuiet(main, 2500, 12000); // others posting in the group keep it busy: don't wait long
     await sleep(1000);
   };
 
@@ -187,12 +190,27 @@
       || boxes[0] || null;
   };
 
-  const attachCsv = async () => {
+  const getCsv = async () => {
     const reply = await chrome.runtime.sendMessage({ type: "getFiles" });
     if (!reply || !reply.files || !reply.files.length) {
       throw new Error((reply && reply.error) || "Couldn't get the CSV from the app.");
     }
-    const file = reply.files[0];
+    return reply.files[0];
+  };
+  // Our own message in the open chat carrying this file (sent, or still on its clock). Only
+  // outgoing messages count - someone else posting the same name doesn't.
+  const sentInChat = (fileName) => {
+    const want = fileName.replace(/\.csv$/i, "").replace(/\s+/g, "").toLowerCase();
+    const main = document.querySelector("#main");
+    if (!main || !want) return false;
+    const mine = main.querySelectorAll('[data-id^="true_"], .message-out');
+    return Array.from(mine).some((el) => {
+      const texts = [el.innerText || "", ...Array.from(el.querySelectorAll("[title]")).map((t) => t.getAttribute("title"))];
+      return texts.some((text) => text.replace(/\s+/g, "").toLowerCase().includes(want));
+    });
+  };
+
+  const attachCsv = async (file) => {
     const transfer = new DataTransfer();
     transfer.items.add(new File([base64ToBytes(file.data)], file.name, { type: "text/csv", lastModified: file.lastModified }));
 
@@ -284,7 +302,7 @@
       !/send (document|message to)|resend/i.test(el.getAttribute("aria-label") || ""))
     .map(clickable)[0] || null;
 
-  const pressSend = async (captionBox) => {
+  const pressSend = async (captionBox, fileName) => {
     if (!(await chrome.runtime.sendMessage({ type: "stillWanted" }))) {
       throw new Error("Stopped from the app - Send was not pressed.");
     }
@@ -304,11 +322,14 @@
       await sleep(300);
       await chrome.runtime.sendMessage({ type: "realType", text: "", pressEnter: true });
     }
-    if (!(await waitFor(() => !findCaptionBox(), 30000))) {
+    // Sent once the preview closes - or once our message with the file shows in the chat (a busy
+    // group can keep the preview busy for a moment).
+    if (!(await waitFor(() => !findCaptionBox() || sentInChat(fileName), 30000))) {
       throw new Error("Pressed Send, but the preview didn't close. Check WhatsApp.");
     }
-    debugLog("sent - the preview closed");
-    await sleep(2000);
+    debugLog(sentInChat(fileName) ? "sent - the message is in the chat" : "sent - the preview closed");
+    await waitFor(() => sentInChat(fileName), 8000); // let it land in the chat (no harm if it's slow)
+    await sleep(1000);
   };
 
   // On a retry, close the file preview a failed try may have left open (only then, so a
@@ -332,6 +353,48 @@
     await sleep(1000);
   };
 
+  // ---------- a plain text message (no file), e.g. "<WO> - Done" ----------
+  const squashText = (text) => (text || "").replace(/\s+/g, "").toLowerCase();
+  // Our own message in the open chat with exactly this text in it (someone else's doesn't count).
+  const textInChat = (text) => {
+    const want = squashText(text);
+    const main = document.querySelector("#main");
+    if (!main || !want) return false;
+    return Array.from(main.querySelectorAll('[data-id^="true_"], .message-out'))
+      .some((el) => squashText(el.innerText).includes(want));
+  };
+  const composeBox = () => Array.from(document.querySelectorAll('#main footer div[contenteditable="true"]')).find(isVisible) || null;
+  const sendText = async (text) => {
+    if (checkFirst && textInChat(text)) {
+      debugLog("that message is already in the chat (sent by us) - not sending it again");
+      finish({ ok: true, sent: true, alreadySent: true, summary: `Already in "${group}": ${text.split("\n")[0]}${text.includes("\n") ? " …" : ""}` });
+      return;
+    }
+    const box = composeBox();
+    if (!box) throw new Error("Couldn't find WhatsApp's message box.");
+    if ((box.innerText || "").trim()) throw new Error(`"${group}" has an unsent draft in its message box - send or clear it first.`);
+    debugLog("typing the message");
+    await realClick(box);
+    await sleep(400);
+    if (!(await chrome.runtime.sendMessage({ type: "realTypeLines", lines: text.split("\n") }))) throw new Error("Couldn't type the message.");
+    await sleep(700);
+    if (!send) {
+      finish({ ok: true, sent: false, summary: `Typed in "${group}" - press Send.` });
+      return;
+    }
+    if (!(await chrome.runtime.sendMessage({ type: "stillWanted" }))) throw new Error("Stopped from the app - Send was not pressed.");
+    debugLog("pressing Enter to send");
+    await chrome.runtime.sendMessage({ type: "realType", text: "", pressEnter: true });
+    const lastLine = text.split("\n").pop();
+    if (!(await waitFor(() => textInChat(lastLine) || !(composeBox()?.innerText || "").trim(), 20000))) {
+      throw new Error("Pressed Send, but the message is still in the box. Check WhatsApp.");
+    }
+    await waitFor(() => textInChat(lastLine), 8000);
+    debugLog("sent");
+    await sleep(800);
+    finish({ ok: true, sent: true, summary: `Sent to "${group}": ${text.split("\n").length > 1 ? `${text.split("\n").length} lines` : text}` });
+  };
+
   // ---------- run ----------
   try {
     if (attempt > 1) debugLog(`try ${attempt}`);
@@ -339,10 +402,18 @@
     await closeLeftoverPreview();
     await openChat();
     await waitForMessagesLoaded();
-    const { captionBox, fileName } = await attachCsv();
+    if (job.data.text) { await sendText(job.data.text); return; }
+    const file = await getCsv();
+    if (checkFirst && sentInChat(file.name)) {
+      debugLog(`${file.name} is already in the chat (sent by us) - not sending it again`);
+      finish({ ok: true, sent: true, alreadySent: true,
+               summary: `Already in "${group}" on WhatsApp: ${file.name} - not sent again.` });
+      return;
+    }
+    const { captionBox, fileName } = await attachCsv(file);
     await typeCaption(captionBox);
     if (send) {
-      await pressSend(captionBox);
+      await pressSend(captionBox, fileName);
       finish({ ok: true, sent: true, summary: `Sent to "${group}" on WhatsApp: ${fileName} with the report.` });
     } else {
       finish({ ok: true, sent: false,

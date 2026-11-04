@@ -148,13 +148,44 @@ export const confirmBox = (title, body, okLabel = "OK", okCls = "btnPrimary") =>
   modal({ title, body, buttons: [{ label: "Cancel", value: false }, { label: okLabel, value: true, cls: okCls }] });
 
 // ---------- clipboard / button feedback ----------
-export async function copyText(text) {
-  try {
-    await navigator.clipboard.writeText(text);
-  } catch {
-    const area = h("<textarea style='position:fixed;opacity:0'></textarea>");
-    area.value = text; document.body.append(area); area.select(); document.execCommand("copy"); area.remove();
+// Copies text (plus HTML when given, so Excel keeps cells as text). Returns true when it worked.
+// navigator.clipboard only exists on https or localhost: a tablet/phone opening the app at
+// http://<pc-ip>:5000 has none, so it falls back to the old copy command, which works there.
+export async function copyText(text, html = "") {
+  if (navigator.clipboard && window.isSecureContext) {
+    try {
+      if (html && window.ClipboardItem) {
+        await navigator.clipboard.write([new ClipboardItem({
+          "text/plain": new Blob([text], { type: "text/plain" }), "text/html": new Blob([html], { type: "text/html" }),
+        })]);
+      } else await navigator.clipboard.writeText(text);
+      return true;
+    } catch { /* blocked: try the old way */ }
   }
+  return legacyCopy(text, html);
+}
+function legacyCopy(text, html) {
+  const onCopy = (event) => {
+    event.clipboardData.setData("text/plain", text);
+    if (html) event.clipboardData.setData("text/html", html);
+    event.preventDefault();
+  };
+  const before = document.activeElement;
+  const area = document.createElement("textarea");
+  area.value = text;
+  area.readOnly = true; area.contentEditable = "true";  // iPad/iPhone select a read-only box this way (no keyboard)
+  area.style.cssText = "position:fixed;top:0;left:0;width:2px;height:2px;padding:0;border:0;opacity:0;font-size:16px";
+  document.body.append(area);
+  area.focus({ preventScroll: true });
+  area.select();
+  try { area.setSelectionRange(0, text.length); } catch { /* not supported */ }
+  document.addEventListener("copy", onCopy, true);
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch { ok = false; }
+  document.removeEventListener("copy", onCopy, true);
+  area.remove();
+  if (before && before.focus) before.focus({ preventScroll: true });
+  return ok;
 }
 export function flash(button, ok = true, text = ok ? "Copied" : "Failed") {
   if (!button) return;
@@ -169,8 +200,8 @@ export function flash(button, ok = true, text = ok ? "Copied" : "Failed") {
 }
 export async function copyWithFlash(button, text, label = "Copied") {
   if (!text) return;
-  await copyText(text);
-  flash(button, true, label);
+  const ok = await copyText(text);
+  flash(button, ok, ok ? label : "Copy failed");
 }
 
 // ---------- misc ----------

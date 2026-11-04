@@ -9,6 +9,7 @@ import socket
 import sys
 import tempfile
 import threading
+import time
 import webbrowser
 from datetime import datetime
 from pathlib import Path
@@ -116,6 +117,8 @@ def detail(record):
     data.update({
         "lat": lat, "long": lon, "location": f"{lat}, {lon}" if lat or lon else "",
         "isLocal": isLocalStart(record),
+        # TEMS has made the WO's result file (GridSummary): it's done driving
+        "resultReady": bool(record.get("startedAt")) and readyToEnd(record),
         "report": workflows.reportFromRecord(record) if record.get("startedAt")
         else workflows.formatLocationPreview(record.get("wo", ""), record),
         "reportFields": workflows.reportFieldsFromRecord(record),
@@ -158,6 +161,7 @@ def state():
     cloud = cloudStartToday()
     # Tickets of today (started / ended / moved here); imported-but-not-started ones are under "To start".
     todays = [r for r in records if (recordDay(r) or "").startswith(today) and r.get("startedAt")]
+    openToday = openTicketsToday()
     pmFrom = datetime.combine(datetime.now().date(), config.driveShiftPmFrom)
     return jsonify({
         "now": datetime.now().isoformat(timespec="seconds"),
@@ -170,7 +174,8 @@ def state():
         "nextLocalId": localTicketId(nextLocalNumber()),
         "counts": {
             "today": len(todays),
-            "open": len(openTicketsToday()),
+            "open": sum(1 for r in openToday if readyToEnd(r)),      # End Ticket: result is ready
+            "driving": sum(1 for r in openToday if not readyToEnd(r)),  # Live Testing: still driving
             "completedToday": sum(1 for r in todays if r.get("endedAt")),
             "toStart": len(notStartedRecords()),
             "readyToClose": sum(1 for r in records if workflows.isReadyToClose(r)),
@@ -403,6 +408,7 @@ def settings():
                      "skipped": config.defaultSkipped, "status": config.defaultStatus},
         "statusOptions": workflows.statusOptions, "equipments": config.equipments,
         "folderNamePrefix": config.folderNamePrefix, "whatsappGroup": config.whatsappGroup,
+        "whatsappWoGroup": config.whatsappWoGroup,
         "whatsappSend": config.whatsappSend, "whatsappRetries": config.whatsappRetries,
         "whatsappAutoShare": config.whatsappAutoShare,
         "temsTestMode": config.temsTestMode, "temsProject": config.temsProject, "temsAssignWo": config.temsAssignWo,
@@ -620,9 +626,20 @@ def importSheet():
 
 
 # ---------- end ----------
+def readyToEnd(record):
+    """TEMS has written the WO's result (GridSummary.csv) - it's driven and can be ended."""
+    from kaam.gridSummary import resultReady
+    return resultReady(record["wo"])
+
+
 @app.get("/api/end/open")
 def endOpen():
-    return jsonify([summary(r) for r in openTicketsToday()])
+    """Today's open tickets whose result is ready (End Ticket). ?all=1: every open one, with
+    resultReady, for Live Testing (the ones still being driven come first)."""
+    rows = [{**summary(r), "resultReady": readyToEnd(r)} for r in openTicketsToday()]
+    if request.args.get("all"):
+        return jsonify(sorted(rows, key=lambda r: r["resultReady"]))
+    return jsonify([r for r in rows if r["resultReady"]])
 
 
 @app.post("/api/end/run")
@@ -639,6 +656,21 @@ def endRun():
 
     job = startJob("end", wo, f"{'Upload' if isLocal else 'End'} {wo}", work)
     return jsonify({"job": job.toJson()})
+
+
+@app.post("/api/end/runAll")
+def endRunAll():
+    """End Tickets: every WO End Ticket lists (today's open ones whose result file is in), oldest
+    first - all uploads, then the WhatsApp shares one by one (only what ended and wasn't shared)."""
+    data = body()
+    rows = sorted((r for r in openTicketsToday() if readyToEnd(r)), key=lambda r: r.get("startedAt") or "")
+    wos = [r["wo"] for r in rows]
+    if not wos:
+        return fail("Nothing to end - no open WO has its result file yet.")
+    send = data.get("send")
+    job = startJob("endAll", "", f"End {len(wos)} tickets",
+                   lambda job: workflows.endAll(wos, post=job.post, send=send))
+    return jsonify({"job": job.toJson(), "wos": wos})
 
 
 @app.post("/api/end/save")
@@ -711,6 +743,8 @@ def tems():
     wo = workflows.cleanWorkOrder(data.get("wo", ""))
     cloudWo = workflows.cleanWorkOrder(data.get("cloudWo", ""))
     assignWo = workflows.cleanWorkOrder(data.get("assignWo", ""))
+    if action == "play":
+        return temsPlay()
     if action != "test" and not wo:
         return fail("Enter a WO first.")
     if action == "test" and not (cloudWo or assignWo):
@@ -733,6 +767,42 @@ def tems():
     return jsonify({"job": job.toJson()})
 
 
+def temsPlay():
+    """Live Testing's Start ticket: TEMS's Control page, then play - only when TEMS says the open WO
+    is Validated / Paused (read from TEMS first; never pressed while it runs - that would pause it).
+    Stays on TEMS."""
+    from kaam import temsMap
+
+    def work(job):
+        try:
+            before = temsMap.workOrderState()
+        except Exception as error:
+            raise RuntimeError(f"TEMS isn't answering at {config.temsUrl} - is TEMS Paragon running? ({error})")
+        name = before["wo"] or "the open WO"
+        job.progress(f"TEMS: {name} is {before['stateName']}" + (f" ({before['error']})" if before["error"] else ""))
+        if before["state"] == temsMap.executing:
+            return {"ok": True, "summary": f"TEMS: {name} is already running - nothing pressed."}
+        canPlay = before["state"] in temsMap.playable
+        job.progress("Opening TEMS Control" + (", pressing play…" if canPlay else " (play isn't ready yet)…"))
+        result = runTems("play", canPlay=canPlay)
+        if not result.get("ok"):
+            return result
+        if not canPlay:
+            why = before["error"] or f"it's {before['stateName']}, play works once it's Validated (green)"
+            return {"ok": False, "error": f"TEMS Control is open, but {name} can't start yet: {why}."}
+        if result.get("played"):
+            for _ in range(20):  # TEMS takes a moment to start
+                time.sleep(0.75)
+                after = temsMap.workOrderState()
+                if after["state"] == temsMap.executing:
+                    return {"ok": True, "summary": f"TEMS: {name} started (Executing)."}
+            return {"ok": False, "error": f"Pressed play, but {name} is {after['stateName']}"
+                                          + (f" ({after['error']})" if after["error"] else "") + ". Check TEMS."}
+        return result
+    job = startJob("tems", "", "TEMS: start ticket", work)
+    return jsonify({"job": job.toJson()})
+
+
 # ---------- Live Testing (phones over adb, Vysor windows) ----------
 liveActions = {
     "desk": "Set up desk",
@@ -741,6 +811,38 @@ liveActions = {
     "speedtest": "Speed test",
     "airplane": "Airplane toggle",
 }
+
+
+@app.get("/api/live/temsMap")
+def liveTemsMap():
+    """TEMS's live map data (grid, route, track, car) for the Live Testing map."""
+    from kaam import temsMap
+    try:
+        return jsonify(temsMap.readMap(request.args.get("trackFrom", 0, type=int)))
+    except temsMap.TemsOffline as error:
+        return fail(str(error), 503)
+
+
+@app.get("/api/live/signal")
+def liveSignal():
+    """What each connected phone is latched to right now (NR / LTE, band, PCI, RSRP, SINR...),
+    read continuously in the background while a Live Testing page keeps asking."""
+    from kaam import liveSignal as signal, phoneControl
+    import time as clock
+    try:
+        connected = set(phoneControl.connectedSerials())
+    except Exception as error:
+        return fail(error, 503)
+    phones = {name: serial for name, serial in phoneControl.configuredPhones().items() if serial in connected}
+    readings = signal.signals(list(phones.values()))
+    now = clock.time()
+    out = {}
+    for name, serial in phones.items():
+        reading = readings.get(serial)
+        if reading:
+            out[name] = {**{k: v for k, v in reading.items() if k != "at"}, "age": round(now - reading["at"], 1),
+                         "text": phoneControl.networkText(reading)}
+    return jsonify({"phones": out})
 
 
 @app.get("/api/live/phones")
@@ -760,7 +862,13 @@ def livePhones():
             phone["airplane"] = phoneControl.isAirplaneOn(serial)
             phone["locked"] = "isKeyguardShowing=true" in phoneControl.adbShell(
                 serial, "dumpsys window | grep -m1 isKeyguardShowing")
-            phone["network"] = phoneControl.readNetwork(serial)
+            # The live loop's reading when it's fresh (no second screen read fighting it).
+            from kaam import liveSignal
+            fresh = liveSignal.latest.get(serial)
+            if fresh and datetime.now().timestamp() - fresh["at"] < 30:
+                phone["network"] = {k: v for k, v in fresh.items() if k != "at"}
+            else:
+                phone["network"] = phoneControl.readNetwork(serial)
             phone["networkText"] = phoneControl.networkText(phone["network"])
         except Exception as error:
             phone["error"] = str(error)

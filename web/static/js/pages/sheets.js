@@ -3,7 +3,7 @@
 //   Coordinator Data - WOs done today: WO only
 // Same WOs as today's map; driven ones in the order you drove them, the rest in Start's To start
 // order (the order picked on Maps).
-import { $, api, esc, flash, icon, onDataChange, toast } from "../core.js";
+import { $, api, copyText, esc, flash, icon, onDataChange, toast } from "../core.js";
 
 const tables = [
   {
@@ -68,13 +68,7 @@ export default {
       const tsv = table.map((cells) => cells.map((c) => String(c).replace(/[\t\r\n]+/g, " ")).join("\t")).join("\r\n");
       const cell = (c, col) => (textColumns.has(keys[col]) ? `<td style="mso-number-format:'\\@'">${esc(c)}</td>` : `<td>${esc(c)}</td>`);
       const html = `<table>${table.map((cells, n) => `<tr>${cells.map((c, col) => (header && n === 0 ? `<th>${esc(c)}</th>` : cell(c, col))).join("")}</tr>`).join("")}</table>`;
-      try {
-        await navigator.clipboard.write([new ClipboardItem({
-          "text/plain": new Blob([tsv], { type: "text/plain" }), "text/html": new Blob([html], { type: "text/html" }),
-        })]);
-      } catch {
-        try { await navigator.clipboard.writeText(tsv); } catch { flash(button, false, "Copy failed"); return; }
-      }
+      if (!(await copyText(tsv, html))) { flash(button, false, "Copy failed"); return; }
       flash(button, true, `Copied ${list.length}`);
     }
 

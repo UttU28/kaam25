@@ -50,9 +50,11 @@ fields = [
     ("TEMS_URL", "TEMS", "TEMS Paragon address", "url", "The extension only works on http://localhost:8080/.", {"optional": True, "default": temsUrl}),
     # ---------- WhatsApp ----------
     ("WHATSAPP_GROUP", "WhatsApp", "Group name", "text", "Chat name exactly as it shows in WhatsApp.", {}),
+    ("WHATSAPP_GROUP_WO", "WhatsApp", "WO group", "text",
+     "After the summary, \"<WO> - Done\" is sent here (End Tickets: all WOs in one message). Blank: skipped.", {}),
     ("WHATSAPP_SEND", "WhatsApp", "Press Send", "bool", "On: presses Send in WhatsApp. Off: fills the message, you press Send. End's Send switch starts here (saving this resets it).", {}),
     ("WHATSAPP_AUTO_SHARE", "WhatsApp", "Share by itself after End", "bool",
-     "On: once Find in Chrome / Upload has the Ticket ID, both EQ Job IDs and the renamed GridSummary, End shares on WhatsApp by itself. Off: you press WhatsApp.",
+     "On: once End Ticket / Upload has the Ticket ID, both EQ Job IDs and the renamed GridSummary, End shares on WhatsApp by itself. Off: you press WhatsApp.",
      {"optional": True, "default": "true"}),
     ("WHATSAPP_RETRIES", "WhatsApp", "Retries", "int", "Extra tries when a share fails (5 s apart).", {"min": 0, "max": 10}),
     # ---------- Web pages ----------

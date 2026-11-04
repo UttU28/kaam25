@@ -16,6 +16,10 @@ and CSVs separated by , ; tab or |.
 
 readSheet(path, team) returns (rows, notes): notes are short, readable lines about anything
 unusual (swapped columns, other teams skipped, missing grid keys, duplicates...).
+
+A plan with grid keys but no WO names gets them made up from its Grouping and date columns:
+    SO-HN_LM_231 + 11/04/2026  ->  SO-HN_LM_231_G23e_2U_110426_Nokia
+(the middle and the end - G23e_2U ... Nokia - copied from your latest WO; see nameParts).
 """
 
 import csv
@@ -51,6 +55,70 @@ fieldNames = {"wo": "WO", "gridKey": "Grid key", "lat": "Latitude", "long": "Lon
 
 class SheetImportError(Exception):
     pass
+
+
+# ---------- making WO names when the plan has none ----------
+nameShape = re.compile(r"^(?P<cluster>.+?)_\s*(?P<script>[A-Za-z]\d+[A-Za-z]*)_(?P<variant>[A-Za-z0-9]+)_"
+                       r"(?P<date>\d{6})_(?P<vendor>[A-Za-z]+)$")
+groupingPattern = re.compile(r"^[A-Za-z]{2,}[-_][A-Za-z0-9_\-]*\d$")  # SO-HN_LM_231, CR-CB_RD_029
+defaultParts = {"script": "G23e", "variant": "2U", "vendor": "Nokia"}
+
+
+def nameParts(wos):
+    """The middle and end of the newest WO name (by its mmddyy): {"script", "variant", "vendor"}."""
+    best = None
+    for wo in wos:
+        match = nameShape.match(re.sub(r"\s+", "", wo or ""))
+        if not match:
+            continue
+        mmddyy = match["date"]
+        order = mmddyy[4:6] + mmddyy[0:4]  # yymmdd sorts by date
+        if best is None or order > best[0]:
+            best = (order, {key: match[key] for key in ("script", "variant", "vendor")})
+    return best[1] if best else dict(defaultParts)
+
+
+def planDate(text):
+    """mmddyy from a plan date cell: 2026-11-04 / 11/4/2026 / 110426; '' if it isn't one."""
+    text = str(text or "").strip()
+    for pattern, order in ((r"(\d{4})-(\d{1,2})-(\d{1,2})", "ymd"), (r"(\d{1,2})/(\d{1,2})/(\d{2,4})", "mdy")):
+        found = re.match(pattern, text)
+        if found:
+            parts = dict(zip(order, found.groups()))
+            return f"{int(parts['m']):02d}{int(parts['d']):02d}{parts['y'][-2:]}"
+    return text if re.fullmatch(r"(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])\d{2}", text) else ""
+
+
+def addWoNames(rows, parts):
+    """A plan without WO names: adds a "WO" column made from Grouping + date. Returns
+    (rows, note) or (None, "") when the sheet has no Grouping or date to make them from."""
+    gridRows = [index for index, row in enumerate(rows) if any(isGridKey(value) for value in row)]
+    if not gridRows:
+        return None, ""
+    width = max(len(rows[index]) for index in gridRows)
+    headers = {column: headerTextFor(rows, gridRows[0], column) for column in range(width)}
+    values = {column: [rows[index][column] if column < len(rows[index]) else "" for index in gridRows]
+              for column in range(width)}
+    groupings = [column for column in range(width)
+                 if share(values[column], lambda value: bool(groupingPattern.match(value)) and not isGridKey(value)) >= 0.8]
+    dates = [column for column in range(width) if share(values[column], lambda value: bool(planDate(value))) >= 0.8]
+    if not groupings or not dates:
+        return None, ""
+    grouping = max(groupings, key=lambda column: headerScore(headers[column], "cluster"))
+    dateColumn = max(dates, key=lambda column: "date" in headers[column].lower())
+    out = [list(row) + [""] * (width - len(row)) for row in rows]
+    for index in range(gridRows[0]):
+        out[index].append("WO" if index == gridRows[0] - 1 else "")
+    made = 0
+    for index in gridRows:
+        cluster, mmddyy = out[index][grouping].strip(), planDate(out[index][dateColumn])
+        name = f"{cluster}_{parts['script']}_{parts['variant']}_{mmddyy}_{parts['vendor']}" if cluster and mmddyy else ""
+        out[index].append(name)
+        made += bool(name)
+    note = (f"No WO names in this plan - made them from {headers[grouping] or 'the grouping'} + "
+            f"{headers[dateColumn] or 'the date'} ({parts['script']}_{parts['variant']} and {parts['vendor']} "
+            "copied from your latest WO), e.g. {example}.")
+    return out, note
 
 
 def squash(text):
@@ -322,14 +390,24 @@ def findColumns(rows, woColumn, dataRows, firstDataRow, notes):
 
 
 # ---------- reading the rows ----------
-def readSheet(path, team=None):
+def readSheet(path, team=None, knownWos=()):
     """Returns (rows, notes). rows: dicts with wo, gridKey, lat, long, cluster, region, market,
     team, name (only what the sheet has), in sheet order; a WO listed on several rows with
     different grid keys also gets gridKeys (all of them) and gridCount. team: e.g. "N071" - when the sheet has
-    a Team column with that team in it, only those rows are imported."""
+    a Team column with that team in it, only those rows are imported. knownWos: WO names already
+    in Records - a plan without WO names gets names shaped like the newest of them."""
     sheets = readSheets(path)
     found = [(name, rows, *findWoColumn(rows)) for name, rows in sheets]
     found.sort(key=lambda item: item[3], reverse=True)
+    madeNote = ""
+    if not found[0][3]:
+        # No WO names anywhere: make them from Grouping + date (the sheet with the most grid keys).
+        parts = nameParts(knownWos)
+        for name, rows in sorted(sheets, key=lambda item: -sum(isGridKey(v) for row in item[1] for v in row)):
+            made, madeNote = addWoNames(rows, parts)
+            if made:
+                found = [(name, made, *findWoColumn(made))]
+                break
     sheetName, rows, woColumn, woCount = found[0]
     if not woCount:
         hint = ""
@@ -338,7 +416,7 @@ def readSheet(path, team=None):
             hint = " It has grid keys but no WO names - the app needs the WO for each grid."
         raise SheetImportError(f"No WO names found (like SO-HN_LM_136_G23d_2U_102926_Nokia).{hint}")
 
-    notes = []
+    notes = [madeNote] if madeNote else []
     otherSheets = [name for name, _, _, count in found[1:] if count]
     if len(sheets) > 1:
         notes.append(f"Read sheet \"{sheetName}\"" +
@@ -462,6 +540,8 @@ def readSheet(path, team=None):
         notes.append(f"No Team column in this sheet, so it can't be filtered to {team} - imported all "
                      f"{len(workOrders)} WOs. Check they're yours.")
 
+    if madeNote and workOrders:
+        notes[0] = madeNote.replace("{example}", workOrders[0]["wo"])
     for row in workOrders:
         if row.get("gridCount"):
             notes.append(f"{row['wo']} has {row['gridCount']} grids (one per row) - all grid keys saved on it; "

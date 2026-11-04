@@ -37,13 +37,19 @@ export default {
     const job = jobPanel(); q(".jobSlot").replaceWith(job.el);
     const msg = (text, kind = "info") => { q(".msg").innerHTML = text ? `<div class="callout ${kind}">${icon(kind === "ok" ? "check" : kind === "info" ? "info" : "alert", "sm")}<div>${esc(text)}</div></div>` : ""; };
 
+    let shownKey = "";
     const box = woBox({
       placeholder: "Pick from Ready to close, or paste its WO / Ticket ID",
       picker: {
         label: "Ready to close", empty: "Nothing ready to close.",
         load: async () => (await api("/api/close/ready")).map((r) => ({ wo: r.wo, title: r.cluster || r.wo, sub: r.ticketId || "no ticket ID" })),
       },
-      onResolve: (wo, rec) => { record = rec; paint(wo); },
+      onResolve: (wo, rec) => {
+        record = rec;
+        const key = (wo || "").replace(/\s+/g, "").toUpperCase();
+        if (key !== shownKey && !busy) { shownKey = key; job.hide(); }  // a different WO: no old job log
+        paint(wo);
+      },
       onEnter: () => {},
     });
     q(".woSlot").replaceWith(box.el);

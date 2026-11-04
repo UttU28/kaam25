@@ -18,7 +18,7 @@ from .gridSummary import buildFolderName, copyGridSummary, findRenamedCopy
 from .sheetImport import readSheet
 from .ticketLookup import closeTicketSteps, currentDriveShift, lookupTicketId, openCreateTicketForm
 from .ticketStore import (findRecord, getRecord, importWorkOrders, isLocalStart, localIdPattern, now,
-                          saveRecord, startLocal, startNewTicket)
+                          saveRecord, searchRecords, startLocal, startNewTicket)
 from .whatsappShare import shareOnWhatsApp
 
 statusOptions = ["PASSED", "SKIPPED", "FAILED"]
@@ -232,7 +232,7 @@ def importSheetFile(path, sourceName=None):
     """Read an Excel / CSV plan (columns found by their values; only your team's rows) and save
     it. Returns {count, added, updated, alreadyStarted, notes, source}."""
     sourceName = sourceName or Path(path).name
-    rows, notes = readSheet(path, team=employeeId)
+    rows, notes = readSheet(path, team=employeeId, knownWos=[r.get("wo", "") for r in searchRecords()])
     added, updated, alreadyStarted = importWorkOrders(rows, sourceName)
     return {"count": len(rows), "added": added, "updated": updated, "alreadyStarted": alreadyStarted,
             "notes": notes, "source": sourceName}
@@ -308,6 +308,78 @@ def endTicket(wo, post=lambda kind, value: None):
              uploadNotes=uploadSummaries + uploadErrors, **({"endedAt": now()} if allUploaded else {}))
     report = "\n".join(summaries + uploadSummaries + errors + uploadErrors)
     return {"ok": not (errors or uploadErrors), "summary": report, "ticketId": ticketId, "jobIds": jobIds}
+
+
+def endAll(wos, post=lambda kind, value: None, send=None):
+    """End Tickets: End each WO in turn (ticket check, GridSummary, EQ uploads - as End Ticket's
+    button), then share on WhatsApp one by one - only the WOs whose End finished completely and that
+    weren't shared yet (each share first looks in the chat, so nothing goes out twice).
+    Returns {"ok", "summary", "ended", "shared", "failed"}."""
+    from .chromeBridge import StoppedError
+    progress = lambda text: post("progress", text)
+    ended, failed, shared, notShared = [], [], [], []
+    for number, wo in enumerate(wos, 1):
+        tag = f"[{number}/{len(wos)}] {wo}"
+        progress(f"{tag}: ending…")
+        post("current", wo)
+        try:
+            result = endTicket(wo, post=lambda kind, value, tag=tag: post(kind, f"{tag}: {value}") if kind == "progress" else None)
+        except StoppedError:
+            raise
+        except Exception as error:
+            failed.append(f"{wo}: {error}")
+            progress(f"{tag}: problem - {error}")
+            continue
+        record = getRecord(wo) or {}
+        try:  # the report with the Ticket ID and EQ Job IDs, as End Ticket saves it after a run
+            saveReportFields(reportFieldsFromRecord(record), event=None)
+        except Exception:
+            pass
+        if result.get("ok") and record.get("endedAt"):
+            ended.append(wo)
+            progress(f"{tag}: uploads done")
+        else:
+            failed.append(f"{wo}: {result.get('summary', 'finished with problems').splitlines()[-1]}")
+            progress(f"{tag}: finished with problems - not shared")
+        post("ended", list(ended))
+
+    toShare = []
+    for wo in ended:
+        record = getRecord(wo) or {}
+        missing = [name for name, value in (("Ticket ID", record.get("ticketId")), ("GridSummary file", record.get("gridSummaryPath")),
+                                            *((equipment, record.get(equipment.lower())) for equipment in equipments)) if not value]
+        if record.get("whatsappSentAt"):
+            notShared.append(f"{wo}: shared before")
+        elif missing:
+            notShared.append(f"{wo}: missing {', '.join(missing)}")
+        else:
+            toShare.append(wo)
+    for number, wo in enumerate(toShare, 1):
+        tag = f"WhatsApp [{number}/{len(toShare)}] {wo}"
+        progress(f"{tag}: sharing…")
+        post("current", wo)
+        try:
+            outcome = shareTicket(wo, reportFromRecord(getRecord(wo) or {}), send=send, checkFirst=True, woDone=False)
+            shared.append(wo)
+            progress(f"{tag}: {outcome['summary']}")
+        except StoppedError:
+            raise
+        except Exception as error:
+            notShared.append(f"{wo}: {error}")
+            progress(f"{tag}: problem - {error}")
+        post("shared", list(shared))
+
+    doneLine = ""
+    if shared:  # every summary is out: one "- Done" message with all of them in the WO group
+        doneLine = sendWoDone(shared, send=send, progress=progress)
+        if doneLine:
+            progress(doneLine)
+    lines = [f"Ended {len(ended)} of {len(wos)}" + (f", shared {len(shared)} on WhatsApp." if toShare else ".")]
+    if doneLine:
+        lines.append(doneLine)
+    lines += [f"Not ended - {line}" for line in failed] + [f"Not shared - {line}" for line in notShared]
+    return {"ok": not failed and len(shared) == len(toShare), "summary": "\n".join(lines),
+            "ended": ended, "shared": shared, "failed": failed}
 
 
 def saveReportFields(fields, event=None, **extra):
@@ -387,8 +459,36 @@ def updateStatus(wo, total, attempted, skipped, status, remarks, source="Records
 
 
 # ---------- WhatsApp ----------
-def shareTicket(wo, report, send=None, csvPath=None, progress=lambda text: None):
-    """Share the renamed CSV + the report (Ticket ID blank for a local start) on WhatsApp."""
+def doneMessage(wos):
+    """What the WO group gets: "<WO> - Done", one line per WO."""
+    return "\n".join(f"{wo} - Done" for wo in wos)
+
+
+def sendWoDone(wos, send=None, progress=lambda text: None):
+    """"<WO> - Done" (all of them in one message) to the WO group (WHATSAPP_GROUP_WO), for the WOs
+    not done there yet. Returns a summary line, or "" when there's no WO group / nothing to send."""
+    from .config import whatsappSend, whatsappWoGroup
+    from .whatsappShare import sendTextOnWhatsApp
+    send = whatsappSend if send is None else send
+    wos = [wo for wo in wos if not (getRecord(wo) or {}).get("woDoneSentAt")]
+    if not whatsappWoGroup or not wos:
+        return ""
+    progress(f"WhatsApp {whatsappWoGroup}: {', '.join(wos)} - Done…")
+    try:
+        summary, wasSent = sendTextOnWhatsApp(doneMessage(wos), whatsappWoGroup, send=send)
+    except Exception as error:
+        for wo in wos:
+            safeSave(wo, event=f"WhatsApp {whatsappWoGroup}: \"- Done\" failed - {error}")
+        return f"{whatsappWoGroup}: not sent - {error}"
+    for wo in wos:
+        safeSave(wo, event=f"WhatsApp: \"{wo} - Done\" {'sent' if wasSent else 'typed, not sent'} to {whatsappWoGroup}",
+                 **({"woDoneSentAt": now()} if wasSent else {}))
+    return summary
+
+
+def shareTicket(wo, report, send=None, csvPath=None, progress=lambda text: None, checkFirst=False, woDone=True):
+    """Share the renamed CSV + the report (Ticket ID blank for a local start) on WhatsApp, then (woDone)
+    "<WO> - Done" in the WO group."""
     wo = cleanWorkOrder(wo)
     if not wo:
         raise WorkflowError("Enter a WO first.")
@@ -397,12 +497,16 @@ def shareTicket(wo, report, send=None, csvPath=None, progress=lambda text: None)
     csvPath = csvPath or (getRecord(wo) or {}).get("gridSummaryPath")
     progress("Sharing on WhatsApp… (waiting for WhatsApp to load fully)")
     try:
-        summary, wasSent = shareOnWhatsApp(wo, whatsappCaption(wo, report), csvPath, send=send)
+        summary, wasSent = shareOnWhatsApp(wo, whatsappCaption(wo, report), csvPath, send=send, checkFirst=checkFirst)
     except Exception as error:
         safeSave(wo, event=f"WhatsApp: failed - {error}")
         raise
     safeSave(wo, event=f"WhatsApp: {'sent' if wasSent else 'ready, not sent'} to {whatsappGroup}",
              **({"whatsappSentAt": now(), "whatsappGroup": whatsappGroup} if wasSent else {}))
+    if wasSent and woDone:  # the summary is out: then "<WO> - Done" in the WO group
+        done = sendWoDone([wo], send=send, progress=progress)
+        if done:
+            summary += f"\n{done}"
     return {"summary": summary, "sent": wasSent}
 
 

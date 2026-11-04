@@ -10,6 +10,7 @@
       url: params.get("kaamUrl") || "http://localhost:8080/",
       action: params.get("kaamAction") || "test", wo: params.get("kaamWo") || "", project: params.get("kaamProject") || "",
       cloudWo: params.get("kaamCloudWo") || "", assignWo: params.get("kaamAssignWo") || "",
+      canPlay: params.get("kaamCanPlay") === "1",
     },
   });
 })();

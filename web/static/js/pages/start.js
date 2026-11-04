@@ -263,12 +263,17 @@ export default {
       msg("Still not found in TEMS after several tries - check the WO in TEMS.", "bad");
       return null;
     }
+    // Ticket started and opened in TEMS (its Map page is up): on to Live Testing for this WO.
+    function openLiveTesting(wo) {
+      setTimeout(() => { location.hash = `#/live?wo=${encodeURIComponent(wo)}`; }, 1200);
+    }
     // After the ticket: prod = Reserve + Open for real; test mode = ask for two WOs, click nothing.
     async function temsFinish(wo, ticketText) {
       // Local: TEMS was already done in the same visit as the check.
       if (temsDone && wo && temsDone.wo.replace(/\s+/g, "").toLowerCase() === wo.replace(/\s+/g, "").toLowerCase()) {
         msg(`${ticketText} ${temsDone.summary}`, "ok"); toast(`TEMS: ${wo} reserved and opened.`, "ok");
         temsDone = null;
+        openLiveTesting(wo);
         return;
       }
       if (!wo || skipTemsFor === wo) { if (skipTemsFor === wo) msg(`${ticketText} TEMS skipped.`, "warn"); return; }
@@ -295,7 +300,10 @@ export default {
         msg(`${ticketText} Now TEMS: reserving ${wo} and opening it on Assign…`, "info");
         const done = await runTemsJob({ action: "go", wo });
         const r = done.result || {};
-        if (done.state === "done" && r.ok) { msg(`${ticketText} ${r.summary}`, "ok"); toast(`TEMS: ${wo} reserved and opened.`, "ok"); }
+        if (done.state === "done" && r.ok) {
+          msg(`${ticketText} ${r.summary}`, "ok"); toast(`TEMS: ${wo} reserved and opened.`, "ok");
+          openLiveTesting(r.matchedWo || wo);
+        }
         else msg(`${ticketText} TEMS: ${done.state === "stopped" ? "stopped by you." : r.error || done.error || "didn't finish."}`, "bad");
       } catch (error) {
         msg(`${ticketText} TEMS: ${error.message}`, "bad");
