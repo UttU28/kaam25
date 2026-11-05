@@ -42,13 +42,16 @@ export function showLocationQr(wo, lat, lon) {
   $(".qrCopyLatLon", box).addEventListener("click", (e) => copyWithFlash(e.currentTarget, `${lat}, ${lon}`, "Copied"));
 }
 
+const matchedNames = { gridKey: "Grid key", ticketId: "Ticket ID", excelWo: "The Excel spelling" };
+
 // ---------- WO box ----------
 // opts: label, placeholder, picker {label, empty, load: async () => [{wo, title, sub, badge}]},
 //       onResolve(wo, record, matchedBy), onEnter(wo)
 //       compact: true - no Copy button, the picker is a small list button inside the box
 //       tools: extra icon buttons (html) inside a compact box, left of the list button
 //       preview: true (compact) - copy / send icons: copy the preview (WO / Grid Key / Location),
-//                QR icon: the Maps link as a QR code (or to Apeksha when it's on). No preview text is shown anywhere.
+//                QR icon: the Maps link as a QR code (or to Apeksha when it's on).
+//       showPreview: true - the preview text (WO / Grid Key / Location) shown under the box
 export function woBox(opts = {}) {
   const previewHtml = opts.compact && opts.preview
     ? `<button class="iconBtn sm copyPreview" title="Copy the preview (WO / Grid Key / Location)">${icon("copy", "sm")}</button>
@@ -71,8 +74,9 @@ export function woBox(opts = {}) {
         ${opts.compact ? "" : `<button class="btn btnGhost copyBtn" title="Copy the WO">${icon("copy", "sm")}<span>Copy</span></button>${pickerHtml}`}
       </div>
       <div class="match note"></div>
+      ${opts.showPreview ? `<pre class="pre woPreview hidden"></pre>` : ""}
     </div>`);
-  const input = $("input", el), clear = $(".clear", el), match = $(".match", el);
+  const input = $("input", el), clear = $(".clear", el), match = $(".match", el), preview = $(".woPreview", el);
   let record = null, lastResolved = null, token = 0;
   // Room for the icons inside the box: clear + copy + send + list.
   el.style.setProperty("--tools", 1 + (previewHtml ? 2 : 0) + (opts.picker ? 1 : 0));
@@ -109,13 +113,14 @@ export function woBox(opts = {}) {
     const raw = input.value;
     const cleaned = cleanWo(raw);
     clear.classList.toggle("hidden", !raw);
-    if (!cleaned) { record = null; lastResolved = ""; match.textContent = ""; opts.onResolve?.("", null, null); return; }
+    if (!cleaned) { record = null; lastResolved = ""; match.textContent = ""; paintPreview(); opts.onResolve?.("", null, null); return; }
     const mine = ++token;
     try {
       const data = await api(`/api/resolve?q=${enc(raw)}`);
       if (mine !== token) return;
       record = data.record;
       if (data.wo !== raw) { input.value = data.wo; }
+      paintPreview();
       match.className = "match note " + (data.matchedBy && data.matchedBy !== "wo" ? "info" : "");
       if (matchedNames[data.matchedBy]) match.textContent = `${matchedNames[data.matchedBy]} ${raw.trim()} matched this WO.`;
       else if (!record) match.textContent = "Not in Records yet.";
@@ -125,6 +130,13 @@ export function woBox(opts = {}) {
       match.className = "match note bad"; match.textContent = error.message;
     }
   };
+  // The preview under the box (showPreview): only for a WO that's in Records.
+  function paintPreview() {
+    if (!preview) return;
+    const text = record ? previewText() : "";
+    preview.textContent = text;
+    preview.classList.toggle("hidden", !text);
+  }
   const resolve = debounce(resolveNow, 220);
 
   input.addEventListener("input", resolve);

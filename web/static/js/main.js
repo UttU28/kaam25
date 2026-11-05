@@ -142,6 +142,13 @@ async function boot() {
   try {
     store.settings = await api("/api/settings");
     loadWhatsappSend(store.settings.whatsappSend);
+    // Teams button left of the search (Settings → Web pages → Teams link); hidden when it's empty.
+    const teams = $("#teamsBtn");
+    if (store.settings.teamsUrl) {
+      teams.href = store.settings.teamsUrl;
+      teams.innerHTML = icon("teams");
+      teams.classList.remove("hidden");
+    }
   } catch (error) {
     toast(error.message, "bad", 8000);
   }

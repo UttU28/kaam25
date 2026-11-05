@@ -71,6 +71,21 @@ export default {
               </div>
             </div>
           </div>
+          <div class="card picCard">
+            <div class="cardHead"><h2>TEMS picture</h2><span class="badge picBadge"></span></div>
+            <div class="cardBody stack">
+              <div class="picDrop" tabindex="0" title="Drop a picture here, paste one (Ctrl+V), or click to pick a file">
+                <img class="picImg" alt="TEMS picture" hidden>
+                <div class="picEmpty">${icon("upload")}<b>Drop the TEMS picture here</b><span>or click to pick a file · Ctrl+V pastes one</span></div>
+              </div>
+              <div class="picPath mono"></div>
+              <div class="toolbar">
+                <button class="btn btnGhost picPick">${icon("upload", "sm")}<span class="picPickLabel">Add picture</span></button>
+                <button class="btn btnGhost picShow" title="Show it in the pictures folder">${icon("folder", "sm")}<span>Show in folder</span></button>
+              </div>
+              <input type="file" class="picFile" accept="image/png,image/jpeg,image/webp" hidden>
+            </div>
+          </div>
         </div>
       </div>`;
 
@@ -99,7 +114,13 @@ export default {
     const skip = seg([{ value: "0", label: "0" }, { value: "1", label: "1" }], defaults.skipped, (v) => { att.set(opposite(v)); update(); autoSave(); });
     q(".attSlot").replaceWith(att.el); q(".skipSlot").replaceWith(skip.el);
     const status = seg((settings.statusOptions || ["PASSED", "SKIPPED", "FAILED"]).map((s) => ({ value: s, label: s })), defaults.status,
-      () => { update(); autoSave(); }, "statusSeg");
+      (v) => { gridsFor(v); update(); autoSave(); }, "statusSeg");
+    // The status sets the grid counts: SKIPPED = attempted 0, skipped 1; PASSED / FAILED = 1, 0.
+    // Number of grids stays as it is.
+    function gridsFor(value) {
+      const skipped = value === "SKIPPED";
+      att.set(skipped ? "0" : "1"); skip.set(skipped ? "1" : "0");
+    }
     q(".statusSlot").replaceWith(status.el);
     const wa = switchEl((on) => on ? "<b>Send ON</b> · presses Send" : "<b>Send OFF</b> · waits for you", store.whatsappSend,
       (on) => setWhatsappSend(on), "var(--wa)");
@@ -165,6 +186,7 @@ export default {
       else if (!record) hint("Not in Records yet", "var(--amber)");
       else if (q(".savedHint").textContent === "" || q(".savedHint").textContent.startsWith("Not in")) hint("Saves as you change it");
       q(".done").disabled = !f.wo || busy;
+      paintPicture();
       q(".clear").disabled = busy;
     }
     function folderName(wo) {
@@ -248,6 +270,7 @@ export default {
       // Not twice - a WO already shared is left for you to share again by hand.
       if (allDone && store.settings?.whatsappAutoShare !== false && box.get() === wo) {
         const missing = [!record?.ticketId && "Ticket ID", !record?.gridSummaryPath && "GridSummary file",
+          !record?.picture?.exists && "TEMS picture",
           ...(settings.equipments || ["EQ3", "EQ6"]).filter((eq) => !record?.[eq.toLowerCase()])].filter(Boolean);
         if (missing.length) msg(`Not shared on WhatsApp yet - missing ${missing.join(", ")}.`, "warn");
         else if (record?.whatsappSentAt) msg("All done. Already shared on WhatsApp before - press WhatsApp to share again.", "ok");
@@ -323,6 +346,75 @@ export default {
       } catch (error) { msg(error.message, "bad"); }
       finally { button.disabled = false; reloadRecord(); }
     }
+    // ----- the TEMS picture: required for WhatsApp (goes out with the CSV and the report) -----
+    let picShownFor = "";
+    function paintPicture() {
+      const pic = record?.picture || {};
+      const has = Boolean(pic.exists);
+      const img = q(".picImg");
+      const key = has ? `${record.wo}|${pic.at}|${pic.path}` : "";
+      if (key !== picShownFor) {
+        picShownFor = key;
+        if (has) img.src = `/api/records/${enc(record.wo)}/picture?t=${encodeURIComponent(pic.at || Date.now())}`;
+        else img.removeAttribute("src");
+      }
+      img.hidden = !has;
+      q(".picEmpty").hidden = has;
+      const badge = q(".picBadge");
+      badge.textContent = !record ? "" : has ? "Saved" : "Required";
+      badge.className = `badge picBadge ${!record ? "" : has ? "bGreen" : "bAmber"}`;
+      q(".picPath").textContent = has ? `${pic.path}${pic.at ? ` · ${new Date(pic.at).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}` : ""}${pic.source ? ` · ${pic.source}` : ""}` : "";
+      q(".picPickLabel").textContent = has ? "Replace" : "Add picture";
+      q(".picPick").disabled = !record || busy;
+      q(".picShow").disabled = !has;
+      q(".picDrop").classList.toggle("off", !record);
+      const wa = q(".wa");
+      wa.disabled = busy || (Boolean(record) && !has);
+      wa.title = record && !has ? "Add the TEMS picture first - it goes out with the CSV and the report" : "Share the CSV, the TEMS picture and the report";
+    }
+    async function uploadPicture(file) {
+      const wo = box.get();
+      if (!wo || !record) return msg("Pick a WO that's in Records first.", "bad");
+      if (!file || !/^image\/(png|jpe?g|webp)$/i.test(file.type)) return msg("That isn't a picture (PNG, JPG or WEBP).", "bad");
+      if (record.picture?.exists && !(await modal({
+        title: "Replace the picture?", body: `<p>${esc(wo)} already has a TEMS picture. The new one replaces it.</p>`,
+        buttons: [{ label: "Cancel", value: false }, { label: "Replace", value: true, cls: "btnPrimary" }],
+      }))) return;
+      const form = new FormData();
+      form.append("picture", file, file.name || "picture.png");
+      try {
+        const r = await api(`/api/records/${enc(wo)}/picture`, { form });
+        if (box.get() === wo) record = r.record;
+        msg(r.message, "ok"); update(); refreshState();
+      } catch (error) { msg(error.message, "bad"); }
+    }
+    q(".picPick").addEventListener("click", () => q(".picFile").click());
+    q(".picDrop").addEventListener("click", () => { if (record) q(".picFile").click(); });
+    q(".picFile").addEventListener("change", (e) => { const f = e.target.files[0]; e.target.value = ""; if (f) uploadPicture(f); });
+    q(".picShow").addEventListener("click", async () => {
+      try { await api(`/api/records/${enc(box.get())}/picture/show`, { method: "POST" }); } catch (error) { msg(error.message, "bad"); }
+    });
+    const card = q(".picCard");
+    ["dragenter", "dragover"].forEach((type) => card.addEventListener(type, (e) => {
+      if (![...(e.dataTransfer?.types || [])].includes("Files")) return;
+      e.preventDefault(); card.classList.add("dragging");
+    }));
+    ["dragleave", "drop"].forEach((type) => card.addEventListener(type, (e) => {
+      if (type === "dragleave" && card.contains(e.relatedTarget)) return;
+      card.classList.remove("dragging");
+    }));
+    card.addEventListener("drop", (e) => {
+      e.preventDefault();
+      const f = [...(e.dataTransfer?.files || [])].find((x) => x.type.startsWith("image/"));
+      if (f) uploadPicture(f); else msg("Drop a picture file (PNG, JPG or WEBP).", "bad");
+    });
+    const onPaste = (e) => {
+      if (e.target.closest?.("input, textarea, [contenteditable='true']")) return;
+      const f = [...(e.clipboardData?.files || [])].find((x) => x.type.startsWith("image/"));
+      if (f) { e.preventDefault(); uploadPicture(f); }
+    };
+    document.addEventListener("paste", onPaste);
+
     function clearForm() {
       box.set(""); record = null; loadedKey = null; shownKey = "";
       resetFields(); msg("Type the WO and press Enter to look up the Ticket ID.", "info"); update(); box.focus();
@@ -388,6 +480,6 @@ export default {
       });
       update();
     });
-    return () => { document.removeEventListener("keydown", onKey); offCount(); offData(); };
+    return () => { document.removeEventListener("keydown", onKey); document.removeEventListener("paste", onPaste); offCount(); offData(); };
   },
 };

@@ -5,7 +5,7 @@
 Skips whatever is already done: unlocked phones, Service Mode + Speedtest already showing,
 phones already open in Vysor.
 
-Phones come from PHONES in .env (TMO 1=<serial>,TMO 2=<serial>), in that order. Each name must match
+Phones come from Settings > Phones (PHONE_TMO1 / PHONE_TMO2 in .env), in that order. Each name must match
 the device's name in Vysor, because that is the title of its Vysor window.
 
 Run from the kaam25 folder:  venv\\Scripts\\python.exe -m kaam.deskLayout
@@ -174,6 +174,27 @@ def phoneWindow(name):
     return findWindow("vysor.exe", lambda title: title.strip() == name)
 
 
+def closePhones(timeout=8):
+    """Closes the TMO 1 / TMO 2 Vysor windows (like pressing their X), so Set up desk can open them
+    fresh. Vysor itself and the phones are left alone. Returns the names it closed."""
+    names = list(configuredPhones())
+    open_ = {name: phoneWindow(name) for name in names}
+    open_ = {name: hwnd for name, hwnd in open_.items() if hwnd}
+    if not open_:
+        say("No TMO window open in Vysor - nothing to close")
+        return []
+    for name, hwnd in open_.items():
+        say(f"Closing {name}")
+        user32.PostMessageW(hwnd, 0x0010, 0, 0)  # WM_CLOSE
+    end = time.time() + timeout
+    while time.time() < end and any(phoneWindow(name) for name in open_):
+        time.sleep(0.3)
+    still = [name for name in open_ if phoneWindow(name)]
+    for name in open_:
+        say(f"{name} still open - close it in Vysor" if name in still else f"{name} closed")
+    return [name for name in open_ if name not in still]
+
+
 def hideVysorHome():
     """Minimises Vysor's own device-list window, so only the phone windows show."""
     for hwnd, title, exe in topWindows():
@@ -217,7 +238,7 @@ def isCovered(hwnd):
 def layoutDesk():
     phones = configuredPhones()
     if not phones:
-        raise RuntimeError("Add your phones to .env first, e.g.  PHONES=TMO 1=<serial>,TMO 2=<serial>")
+        raise RuntimeError("Add your phones first: Settings > Phones, TMO 1 / TMO 2 serial (from  adb devices).")
     connected = set(connectedSerials())
     toOpen = [serial for serial in phones.values() if serial in connected]
     for name, serial in phones.items():
@@ -244,7 +265,7 @@ def layoutDesk():
             continue
         hwnd = waitForWindow("vysor.exe", lambda title, name=name: title.strip() == name, 25)
         if not hwnd:
-            say(f"No Vysor window called '{name}'. Check the device's name in Vysor matches PHONES in .env.")
+            say(f"No Vysor window called '{name}'. Check the device's name in Vysor is TMO 1 / TMO 2.")
             continue
         x = left + half + slot * quarter
         placeWindow(hwnd, x, top, width - half - quarter if slot == 1 else quarter, height)
@@ -272,7 +293,7 @@ def setupDesk():
     phones open in Vysor (only those not showing), then Chrome left half + phones right."""
     phones = configuredPhones()
     if not phones:
-        raise RuntimeError("Add your phones to .env first, e.g.  PHONES=TMO 1=<serial>,TMO 2=<serial>")
+        raise RuntimeError("Add your phones first: Settings > Phones, TMO 1 / TMO 2 serial (from  adb devices).")
     connected = set(connectedSerials())
     ready = [serial for serial in phones.values() if serial in connected]
     # Start Vysor first so its windows load while the phones get set up.

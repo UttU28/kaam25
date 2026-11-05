@@ -52,10 +52,11 @@ In that Chrome: be signed in to TechInsights, ActixOne and **WhatsApp Web**, and
 
 | Page | What it does |
 |---|---|
-| **Start Ticket** | Import the day's plan (Excel / CSV - a plan with grid keys but no WO names gets names made from Grouping + date), start a WO as cloud or local, then TEMS Reserve + Open and back to Live Testing. |
-| **Live Testing** | The WO you're driving, the TEMS map live, each phone's live RSRP / SINR / Band / BW / PCI, Set up desk, **Start ticket** (presses play on TEMS Control), Full test / Airplane / Speed test with a pop-up per step. |
-| **End Ticket** | Ticket check, GridSummary copy, EQ uploads, report, then WhatsApp: the summary group, then "&lt;WO&gt; - Done" in the WO group. **End N Tickets** does every ready WO: all uploads, then the shares one by one, then one "- Done" message. A WO shows here once TEMS made its GridSummary. |
-| **Close Ticket** | The TechInsights close steps for a PASSED ticket. |
+| **Today** | The day at a glance, and **Import plan**: drop the day's Excel / CSV (a plan with grid keys but no WO names gets names made from Grouping + date). Every WO is then looked up in TEMS Cloud (the project scrolled to the end, plus Assign) and marked In TEMS / On Assign / Not in TEMS; a plan's G23d that TEMS has as G23e is renamed to TEMS's spelling (everything else - number, date - must match). The WOs TEMS doesn't have: Copy for Excel or Download Excel, for the coordinators. **Check TEMS** runs it again. |
+| **Start Ticket** | Start a WO as cloud or local, then TEMS Reserve + Open and back to Live Testing. |
+| **Live Testing** | The WO you're driving, the TEMS map live, each phone's live RSRP / SINR / Band / BW / PCI, Set up desk, **Start Stationary** (reopens the phones, opens the WO from Assign if needed, presses play; turns into **Start Mobility** with a beep once stationary is done, then Submit / Discard / Suspend when TEMS finishes), **Hotspot**, Full test / Airplane / Speed test with a pop-up per step. |
+| **End Ticket** | Ticket check, GridSummary copy, EQ uploads, report, the **TEMS picture** (required: from Live Testing's Submit, or click / drag / paste one in), then WhatsApp: the renamed CSV + the picture with the report as caption in the summary group, then "&lt;WO&gt; - Done" in the WO group. **End N Tickets** does every ready WO: all uploads, then the shares one by one, then one "- Done" message. A WO shows here once TEMS made its GridSummary. |
+| **Close Ticket** | The TechInsights close steps for a cloud ticket (PASSED, SKIPPED or FAILED). |
 | **Maps** | Today's (or tomorrow's) WOs on the map with the shortest route; the order you set is the order Start lists them. |
 | **Sheets** | Today's tables for Excel; **Send to WO group** sends the done list to WhatsApp. |
 | **Records** | Everything saved. Tick pending WOs to **Move to today**, or (all already today's) **Move to tomorrow** to plan the next day tonight. |
@@ -74,9 +75,9 @@ Live Testing drives two Samsung phones over USB. Each phone has its own serial, 
    information → tap **Build number** 7 times → Developer options → **USB debugging** on.
 2. Plug the phones in by USB and tap **Allow** (tick *Always allow from this computer*).
 3. Get the serials: open Vysor (it lists them) or run `adb devices`.
-4. In the app: **Settings → Phones → Test phones**:
-   `TMO 1=<serial of phone 1>,TMO 2=<serial of phone 2>` → Save. The names must match the
-   phone names in Vysor (rename them in Vysor if needed). The first one goes on the left.
+4. In the app: **Settings → Phones**: paste phone 1's serial into **TMO 1 serial** and phone 2's
+   into **TMO 2 serial** → Save. The phones must be named TMO 1 / TMO 2 in Vysor (rename them
+   there if needed). TMO 1 goes on the left.
 5. On each phone: a home-screen shortcut to **speedtest.net** named **Speedtest** (Chrome → ⋮ →
    Add to Home screen), and a swipe lock or none (a PIN can't be unlocked from the PC).
 6. **Live Testing → Set up desk**: unlocks the phones, opens Service Mode (*#0011#) on top and
@@ -89,6 +90,7 @@ Split size, airplane seconds, the Speedtest icon name and a custom adb are in **
 
 - Settings live in `.env` (see `.env.example`); the Settings page edits it for you.
 - The app only reads from TEMS (map and state). It clicks in TEMS only when you ask: Start's
-  Reserve + Open, and Live Testing's **Start ticket** (play, only when TEMS shows it ready).
+  Reserve + Open, and Live Testing's **Start Stationary** and Submit / Discard / Suspend (play, only when TEMS shows it ready).
 - Open the app on a tablet on the same WiFi at `http://<this PC's IP>:5000` (Settings → Open on WiFi).
-- Your records (`tickets.json`), `backups/`, `maps/` and logs stay on your PC - they're not in git.
+- Your records (`tickets.json`), `backups/`, `maps/`, `pictures/` (one TEMS picture per WO, its path saved on the WO) and logs stay on your PC - they're not in git.
+- **Teams button** (top of every page, left of the search): opens your Teams link in a new tab - set it in **Settings → Web pages → Teams link** (`TEAMS_URL`); empty hides it.

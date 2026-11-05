@@ -1,4 +1,5 @@
-"""Share a ticket on WhatsApp Web: the renamed CSV with the report as its caption.
+"""Share a ticket on WhatsApp Web: the renamed CSV (report as its caption), then the TEMS picture as
+a photo.
 
 Uses your open WhatsApp Web tab (e.g. a pinned one) if there is one, else opens one.
 With WHATSAPP_SEND=false it stops before Send so you press it yourself.
@@ -50,9 +51,10 @@ def sendTextOnWhatsApp(text, group, send=whatsappSend, retries=whatsappRetries, 
 
 def shareOnWhatsApp(wo, caption, csvPath=None, group=whatsappGroup, send=whatsappSend,
                     retries=whatsappRetries, openUrl=openInChrome, startTimeout=40, timeout=5 * 60,
-                    checkFirst=False):
-    """Returns (summary, wasSent). A retry (and checkFirst) first looks in the chat for this WO's
-    file: if our earlier try did send it (but its "sent" never came back), it isn't sent twice."""
+                    checkFirst=False, picturePath=None):
+    """Returns (summary, wasSent). picturePath: the TEMS picture, sent as a photo right after the CSV.
+    A retry (and checkFirst) first looks in the chat for this WO's file: if our earlier try did send
+    it (but its "sent" never came back), it isn't sent twice."""
     try:
         csvFile = findRenamedCopy(wo, csvPath)
     except Exception as error:
@@ -61,7 +63,7 @@ def shareOnWhatsApp(wo, caption, csvPath=None, group=whatsappGroup, send=whatsap
     attempts = 1 + retries
     for attempt in range(1, attempts + 1):
         def buildUrl(requestId, attempt=attempt):
-            registerFiles(requestId, [csvFile])
+            registerFiles(requestId, [csvFile] + ([picturePath] if picturePath else []))
             return f"http://127.0.0.1:{bridgePort}/whatsapp#" + urllib.parse.urlencode({
                 "kaamId": requestId, "kaamGroup": group, "kaamCaption": caption,
                 "kaamSend": "1" if send else "0", "kaamAttempt": str(attempt),

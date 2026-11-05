@@ -1,5 +1,6 @@
 // Injected into your WhatsApp Web tab for one share: opens the chat, attaches the renamed
-// CSV, types the report as its caption and (only if the app says so) presses Send.
+// CSV, types the report as its caption and (only if the app says so) presses Send. The TEMS
+// picture follows as its own message through Photos & videos, so it shows as a photo.
 // WhatsApp can be slow, so every step waits for the page to finish loading and settle.
 (async () => {
   const job = await chrome.runtime.sendMessage({ type: "jobState" });
@@ -190,17 +191,20 @@
       || boxes[0] || null;
   };
 
-  const getCsv = async () => {
+  // The files for this share: the renamed CSV, then the TEMS picture (sent as its own photo).
+  const getShareFiles = async () => {
     const reply = await chrome.runtime.sendMessage({ type: "getFiles" });
     if (!reply || !reply.files || !reply.files.length) {
       throw new Error((reply && reply.error) || "Couldn't get the CSV from the app.");
     }
-    return reply.files[0];
+    return reply.files;
   };
+  const typeOf = (name) => ({ csv: "text/csv", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp" })[
+    (name.split(".").pop() || "").toLowerCase()] || "application/octet-stream";
   // Our own message in the open chat carrying this file (sent, or still on its clock). Only
   // outgoing messages count - someone else posting the same name doesn't.
   const sentInChat = (fileName) => {
-    const want = fileName.replace(/\.csv$/i, "").replace(/\s+/g, "").toLowerCase();
+    const want = (fileName || "").replace(/\.csv$/i, "").replace(/\s+/g, "").toLowerCase();
     const main = document.querySelector("#main");
     if (!main || !want) return false;
     const mine = main.querySelectorAll('[data-id^="true_"], .message-out');
@@ -210,9 +214,21 @@
     });
   };
 
-  const attachCsv = async (file) => {
+  const isPicture = (name) => typeOf(name).startsWith("image/");
+  // The attach menu's options: Document sends a file as a file; Photos & videos sends a picture
+  // as a picture (shown in the chat, not as a PNG download).
+  const attachOptions = {
+    document: { label: "Document", pattern: /^\s*document\s*$/i },
+    photos: { label: "Photos & videos", pattern: /^\s*photos?\s*(&|and)\s*videos?\s*$/i },
+  };
+  // Attaches the files through one attach-menu option and returns the preview's caption box.
+  const attachFiles = async (files, optionKey) => {
+    const option = attachOptions[optionKey];
+    const file = files[0];
     const transfer = new DataTransfer();
-    transfer.items.add(new File([base64ToBytes(file.data)], file.name, { type: "text/csv", lastModified: file.lastModified }));
+    for (const f of files) {
+      transfer.items.add(new File([base64ToBytes(f.data)], f.name, { type: typeOf(f.name), lastModified: f.lastModified }));
+    }
 
     // Leave the CSV in a hidden carrier box, and catch WhatsApp's "open the file picker" so it
     // gets the carrier's file instead of showing Windows' dialog.
@@ -232,10 +248,10 @@
       '#main footer [data-icon="plus-rounded"], #main footer [data-icon="plus"], #main footer [data-icon="clip"], ' +
       '#main footer [data-icon="attach-menu-plus"], #main footer [aria-label="Attach" i], #main footer [title="Attach" i]');
     const hasSize = (el) => { const rect = el.getBoundingClientRect(); return rect.width > 4 && rect.height > 4; };
-    // The on-screen "Document" text in the attach menu, then the row you'd click.
+    // The option's on-screen text in the attach menu, then the row you'd click.
     const findDocumentItem = () => {
       const label = Array.from(document.querySelectorAll("span, div, li, button"))
-        .filter((el) => hasSize(el) && /^\s*document\s*$/i.test(el.innerText || ""))
+        .filter((el) => hasSize(el) && option.pattern.test(el.innerText || ""))
         .sort((a, b) => a.getBoundingClientRect().width * a.getBoundingClientRect().height
                       - b.getBoundingClientRect().width * b.getBoundingClientRect().height)[0];
       if (!label) return null;
@@ -255,11 +271,11 @@
     const documentItem = await waitFor(findDocumentItem, 8000, 200);
     if (!documentItem) {
       carrier.remove();
-      throw new Error("Opened the attach menu, but its Document option wasn't found.");
+      throw new Error(`Opened the attach menu, but its ${option.label} option wasn't found.`);
     }
     await sleep(400); // let the menu finish opening
     const docRect = documentItem.getBoundingClientRect();
-    debugLog(`choosing Document (${documentItem.tagName.toLowerCase()} at ${Math.round(docRect.left)},${Math.round(docRect.top)})`);
+    debugLog(`choosing ${option.label} (${documentItem.tagName.toLowerCase()} at ${Math.round(docRect.left)},${Math.round(docRect.top)})`);
     pageClick(documentItem);
     if (!(await waitFor(() => !document.getElementById("kaam-file-carrier"), 8000))) {
       // Structure only (tags, roles, positions, file boxes) - no message text.
@@ -272,15 +288,15 @@
       for (let el = documentItem; el && chain.length < 6; el = el.parentElement) chain.push(describe(el));
       const fileBoxes = Array.from(document.querySelectorAll('input[type="file"]'))
         .map((input) => `${input.id || "?"}:${input.accept || "any"}`).join(" ");
-      debugLog(`document option: ${chain.join(" < ")}`);
+      debugLog(`${option.label} option: ${chain.join(" < ")}`);
       debugLog(`file boxes now: ${fileBoxes || "none"} | menu still open: ${!!findDocumentItem()}`);
       carrier.remove();
-      throw new Error("WhatsApp didn't take the CSV from the Document option.");
+      throw new Error(`WhatsApp didn't take ${file.name} from the ${option.label} option.`);
     }
-    debugLog(`attached ${file.name}`);
+    debugLog(`attached ${files.map((f) => f.name).join(" + ")} as ${option.label}`);
 
     const captionBox = await waitFor(findCaptionBox, 30000);
-    if (!captionBox) throw new Error("Attached the CSV, but WhatsApp's file preview didn't open.");
+    if (!captionBox) throw new Error(`Attached ${file.name}, but WhatsApp's preview didn't open.`);
     await waitForQuiet(document.body, 1500, 15000);
     return { captionBox, fileName: file.name };
   };
@@ -328,7 +344,7 @@
       throw new Error("Pressed Send, but the preview didn't close. Check WhatsApp.");
     }
     debugLog(sentInChat(fileName) ? "sent - the message is in the chat" : "sent - the preview closed");
-    await waitFor(() => sentInChat(fileName), 8000); // let it land in the chat (no harm if it's slow)
+    if (fileName) await waitFor(() => sentInChat(fileName), 8000); // let it land in the chat (no harm if it's slow)
     await sleep(1000);
   };
 
@@ -403,21 +419,48 @@
     await openChat();
     await waitForMessagesLoaded();
     if (job.data.text) { await sendText(job.data.text); return; }
-    const file = await getCsv();
+    const files = await getShareFiles();
+    const file = files.find((f) => !isPicture(f.name)) || files[0];
+    const pictures = files.filter((f) => f !== file && isPicture(f.name));
+    const withPicture = pictures.length ? " + the TEMS picture" : "";
     if (checkFirst && sentInChat(file.name)) {
       debugLog(`${file.name} is already in the chat (sent by us) - not sending it again`);
       finish({ ok: true, sent: true, alreadySent: true,
                summary: `Already in "${group}" on WhatsApp: ${file.name} - not sent again.` });
       return;
     }
-    const { captionBox, fileName } = await attachCsv(file);
+    // Message 1: the CSV with the report as its caption. Message 2: the picture, as a photo.
+    const { captionBox, fileName } = await attachFiles([file], "document");
     await typeCaption(captionBox);
+    const attachPictures = async () => {
+      await sleep(1500); // let the chat settle after the CSV went out
+      return (await attachFiles(pictures, "photos")).captionBox;
+    };
+    // The CSV is out by now: a retry would skip this share, so say so instead (not retried).
+    const pictureFailed = (error) => {
+      if (error.message === replacedError) throw error;
+      throw new Error(`Pressed Send on the CSV, but the TEMS picture didn't go (${error.message}). Send the picture yourself.`);
+    };
     if (send) {
       await pressSend(captionBox, fileName);
-      finish({ ok: true, sent: true, summary: `Sent to "${group}" on WhatsApp: ${fileName} with the report.` });
-    } else {
+      if (pictures.length) {
+        try { await pressSend(await attachPictures(), null); } catch (error) { pictureFailed(error); }
+      }
+      finish({ ok: true, sent: true, summary: `Sent to "${group}" on WhatsApp: ${fileName}${withPicture} with the report.` });
+    } else if (!pictures.length) {
       finish({ ok: true, sent: false,
                summary: `Ready in WhatsApp "${group}": ${fileName} attached and the report typed. Press Send.` });
+    } else {
+      // You press Send on the CSV; then the picture is attached for you to send too.
+      debugLog("waiting for you to send the CSV, then the picture is attached");
+      if (!(await waitFor(() => sentInChat(fileName), 4 * 60000, 1000))) {
+        finish({ ok: true, sent: false,
+                 summary: `Ready in WhatsApp "${group}": ${fileName} attached and the report typed. Press Send, then send the TEMS picture yourself.` });
+        return;
+      }
+      await attachPictures();
+      finish({ ok: true, sent: false,
+               summary: `"${group}": you sent ${fileName}; the TEMS picture is attached. Press Send.` });
     }
   } catch (error) {
     if (error.message === replacedError) {

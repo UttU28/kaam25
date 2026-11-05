@@ -42,15 +42,6 @@ export default {
         </div>
         <div class="stack">
           <div class="card">
-            <div class="cardHead"><h2>Import plan</h2><span class="hint">Excel or CSV · team ${esc(settings.employeeId || "")} only</span></div>
-            <div class="cardBody stack">
-              <label class="dropzone">${icon("sheet", "lg")}<div><b>Drop the day's plan here</b> or click to pick</div>
-                <div class="note">Columns are found by their values, so header names don't matter.</div>
-                <input type="file" accept=".xlsx,.xlsm,.csv,.xls" hidden></label>
-              <div class="importMsg"></div>
-            </div>
-          </div>
-          <div class="card">
             <div class="cardHead"><h2>To start</h2><span class="hint waitCount"></span></div>
             <div class="list listScroll waiting" style="padding:6px 0"></div>
           </div>
@@ -63,9 +54,9 @@ export default {
 
     const box = woBox({
       placeholder: "Paste a WO, grid key or Ticket ID",
-      compact: true, preview: true,
+      compact: true, preview: true, showPreview: true,
       picker: {
-        label: "To start", empty: "Nothing for today. Import today's plan, or use Move to today in Records for older ones.",
+        label: "To start", empty: "Nothing for today. Import today's plan on Today, or use Move to today in Records for older ones.",
         load: async () => (await api("/api/start/waiting")).map((r) => ({
           wo: r.wo, title: `${r.mapStop ? `${r.mapStop}. ` : ""}${r.cluster || r.wo}`, sub: r.gridKey ? `${r.gridKey}${r.gridCount > 1 ? ` · ${r.gridCount} grids` : ""}` : r.wo,
         })),
@@ -138,37 +129,12 @@ export default {
             ${r.hasLocation ? `<span title="Has a location" style="color:var(--faint)">${icon("pin", "sm")}</span>` : ""}
             <span style="color:var(--faint)">${icon("arrow", "sm")}</span>
           </div>`).join("")
-        : `<div class="empty">${icon("sheet")}<p>Nothing for today. Import today's plan, or use <b>Move to today</b> in Records for older ones.</p></div>`;
+        : `<div class="empty">${icon("sheet")}<p>Nothing for today. Import today's plan on <a href="#/today">Today</a>, or use <b>Move to today</b> in Records for older ones.</p></div>`;
     }
     $(".waiting", root).addEventListener("click", (e) => {
       const item = e.target.closest(".listItem");
       if (item && !busy) { box.set(item.dataset.wo); msg("Picked from your imported list. Press Start (or Enter).", "info"); box.focus(); }
     });
-
-    // ----- import -----
-    const fileInput = $("input[type=file]", root), zone = $(".dropzone", root);
-    const importFile = async (file) => {
-      if (!file) return;
-      const form = new FormData(); form.append("file", file);
-      $(".importMsg", root).innerHTML = `<div class="note">Reading ${esc(file.name)}…</div>`;
-      try {
-        const r = await api("/api/import", { form });
-        const parts = [`Imported ${r.count} WOs from ${r.source}`, `${r.added} new`];
-        if (r.updated) parts.push(`${r.updated} already in Records`);
-        if (r.alreadyStarted) parts.push(`${r.alreadyStarted} already started`);
-        let text = parts.join(" · ") + ".";
-        if (r.notes?.length) text += "\n" + r.notes.map((n) => `• ${n}`).join("\n");
-        $(".importMsg", root).innerHTML = `<div class="callout ${r.notes?.length ? "warn" : "ok"}">${icon(r.notes?.length ? "alert" : "check", "sm")}<div>${esc(text)}</div></div>`;
-        toast(`Imported ${r.count} WOs.`, "ok");
-        loadWaiting(); refreshState(); box.refresh();
-      } catch (error) {
-        $(".importMsg", root).innerHTML = `<div class="callout bad">${icon("alert", "sm")}<div>${esc(error.message)}</div></div>`;
-      } finally { fileInput.value = ""; }
-    };
-    fileInput.addEventListener("change", () => importFile(fileInput.files[0]));
-    zone.addEventListener("dragover", (e) => { e.preventDefault(); zone.classList.add("over"); });
-    zone.addEventListener("dragleave", () => zone.classList.remove("over"));
-    zone.addEventListener("drop", (e) => { e.preventDefault(); zone.classList.remove("over"); importFile(e.dataTransfer.files[0]); });
 
     // ----- start -----
     function setBusy(on) {

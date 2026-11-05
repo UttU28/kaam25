@@ -61,7 +61,7 @@ export default {
               <tbody>${list.map((r, n) => `<tr><td class="num">${n + 1}</td>
                 ${t.columns.map(([key]) => `<td class="${key === "wo" ? "" : "mono"}">${esc(r[key] || "")}</td>`).join("")}
                 <td><span class="note">${esc(statusText[r.category] || "")}</span></td></tr>`).join("")}</tbody></table>`
-          : `<div class="empty">${icon("sheet")}<p>${rows.length ? t.empty : "No WOs for today yet. Import today's plan on Start Ticket."}</p></div>`;
+          : `<div class="empty">${icon("sheet")}<p>${rows.length ? t.empty : "No WOs for today yet. Import today's plan on Today."}</p></div>`;
       }
     }
 

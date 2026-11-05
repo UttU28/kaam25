@@ -35,13 +35,29 @@
   };
   // Real mouse click (a user gesture), so TEMS is allowed to open its login popup.
   const realClick = async (el) => {
-    el.scrollIntoView({ block: "center" });
-    const rect = el.getBoundingClientRect();
+    // Bring it into view inside its own scrolling panel only. scrollIntoView() would also scroll
+    // TEMS's whole page (which never scrolls itself) and leave it shifted up with a blank gap.
+    const box = scrollBoxOf(el);
+    const view = box ? box.getBoundingClientRect() : { top: 0, bottom: innerHeight };
+    let rect = el.getBoundingClientRect();
+    if (box && (rect.top < view.top || rect.bottom > Math.min(view.bottom, innerHeight))) {
+      box.scrollTop += rect.top - view.top - Math.max(0, (Math.min(view.bottom, innerHeight) - view.top - rect.height) / 2);
+      await sleep(150);
+    }
+    resetPageScroll();
+    rect = el.getBoundingClientRect();
     const clicked = await chrome.runtime.sendMessage({
       type: "realClick", x: rect.left + rect.width / 2, y: rect.top + rect.height / 2,
     });
     if (!clicked) el.click();
+    setTimeout(resetPageScroll, 400);  // Chrome's debugging bar comes and goes: keep the page in place
   };
+  // TEMS's page itself never scrolls (its panels do): if something scrolled it, put it back.
+  function resetPageScroll() {
+    for (const node of new Set([document.scrollingElement, document.documentElement, document.body])) {
+      if (node && (node.scrollTop || node.scrollLeft)) { node.scrollTop = 0; node.scrollLeft = 0; }
+    }
+  }
 
   // ---------- reading the TEMS page ----------
   const menuButton = (label) => [...document.querySelectorAll('[class*="SideMenuButton_menu-button"]')]
@@ -264,81 +280,117 @@
     };
     const button = await waitFor(playButton, 10000);
     if (!button) return finish({ ok: false, controlShown, error: "TEMS Control is open, but its play button isn't there (no WO open?)." });
+    watchNotifications();  // the stationary-test prompt comes later, also when it was already running
     if (!canPlay) return finish({ ok: true, controlShown, played: false, summary: "TEMS Control is open - play isn't ready yet, so it wasn't pressed." });
     if (!isEnabled(button)) return finish({ ok: true, controlShown, played: false, summary: "TEMS Control is open, but its play button is greyed out - not pressed." });
     debugLog("pressing play on Control");
+    window.kaamPlaying = true;  // the watcher leaves this warning to the real click below
     await realClick(button);
-    // TEMS asks to confirm ("Do not attempt to adjust this device while driving..." -> I understand;
-    // a pinpoint warning -> OK).
-    const inPopup = (el) => !!el.closest('[role="dialog"], [class*="Notification" i], [class*="Prompt" i], [class*="Dialog" i], [class*="Modal" i]');
-    const confirmButton = () => [...document.querySelectorAll('button, [role="button"]')]
-      .find((el) => isVisible(el) && (/^i understand$/i.test(textOf(el)) || (/^ok$/i.test(textOf(el)) && inPopup(el))));
-    const confirm = await waitFor(confirmButton, 6000, 250);
+    // TEMS's driving warning ("Do not attempt to adjust this device while driving...") -> I understand.
+    const confirm = await waitFor(() => notificationButton(/do not attempt to adjust this device/i, /^i understand$/i), 8000, 250);
     if (confirm) {
-      debugLog(`confirming: ${textOf(confirm)}`);
+      debugLog("confirming the driving warning: I understand");
       await realClick(confirm);
-      await waitFor(() => !confirmButton(), 4000);
+      await waitFor(() => !notificationButton(/do not attempt to adjust this device/i, /^i understand$/i), 4000);
     }
-    finish({ ok: true, controlShown, played: true, summary: `TEMS: play pressed on Control${confirm ? ` (${textOf(confirm)})` : ""}.` });
+    window.kaamPlaying = false;
+    finish({ ok: true, controlShown, played: true, summary: `TEMS: play pressed on Control${confirm ? " (I understand)" : ""}.` });
   };
 
-  try {
-    if ((job.data || {}).action === "play") { await playOnControl(); return; }
-    // 1. TEMS Paragon loaded, then the Cloud tab.
-    const cloud = await waitFor(() => menuButton("Cloud"), appWaitMs);
-    if (!cloud) {
-      finish({ ok: false, error: `TEMS Paragon didn't load at ${location.origin}. Is TEMS Paragon running?` });
-      return;
+  // TEMS pop-ups (UserNotification): the button labelled `label` in a notification whose text
+  // matches `text`. The buttons are <a class="Button_button...">, not <button>.
+  function notificationButton(text, label) {
+    const boxes = [...document.querySelectorAll('[class*="UserNotification_notification-body"]')]
+      .filter((box) => isVisible(box) && text.test(textOf(box)));
+    for (const box of boxes) {
+      const hit = [...box.querySelectorAll('[class*="Button_button"], a, button')]
+        .find((el) => isVisible(el) && label.test(textOf(el)));
+      if (hit) return hit;
     }
-    if (!isSelected(cloud)) {
-      debugLog("clicking Cloud");
-      cloud.click();
-      if (!(await waitFor(() => isSelected(menuButton("Cloud")), 3000))) await realClick(menuButton("Cloud") || cloud);
-    }
+    return null;
+  }
 
-    // 2. Logged in already, or the Log in button?
-    const state = await waitFor(() => (isLoggedIn() ? "in" : loginButton() ? "out" : null), stateWaitMs);
-    if (!state) {
-      finish({ ok: false, error: "The TEMS Cloud page didn't show its assignments or a Log in button. Check the TEMS tab." });
-      return;
-    }
+  // The test's stage, read from TEMS's own screens:
+  //  stationary - "Executing stationary test ..." banner
+  //  mobility   - "At the stationary location / Accelerate ... to start mobility test" (stationary done)
+  //  complete   - the result page with Submit / Discard / Suspend (stationary + mobility done)
+  //  closed     - we pressed Submit / Discard / Suspend (set by those steps)
+  function resultControls() {
+    return [...document.querySelectorAll('[class*="StandaloneResultPage_controls-section"]')]
+      .find((box) => isVisible(box) && /suspend/i.test(textOf(box))) || null;
+  }
+  function resultButton(label) {
+    const box = resultControls();
+    return box ? [...box.querySelectorAll('[class*="Button_button"], a, button')]
+      .find((el) => isVisible(el) && label.test(textOf(el))) || null : null;
+  }
+  function stageOnScreen() {
+    if (resultControls()) return "complete";
+    const banner = [...document.querySelectorAll('[class*="GridStateBanner_banner"]')].find(isVisible);
+    const text = textOf(banner);
+    if (/executing stationary test/i.test(text)) return "stationary";
+    if (/at the stationary location|start mobility test/i.test(text)) return "mobility";
+    return "";
+  }
+  // Tells the app (Live Testing) the stage; sent on every change and every 20 s while watching.
+  function reportStage(stage) {
+    if (stage) window.kaamStage = stage;
+    chrome.runtime.sendMessage({ type: "temsStage", stage: window.kaamStage || "", wo }).catch(() => {});
+  }
 
-    // 3. Log in: click it; the popup window signs in with Chrome's saved password.
-    if (state === "out") {
-      let clicks = 0, clickedAt = 0;
-      const end = Date.now() + loginWaitMs;
-      while (Date.now() < end && !isLoggedIn()) {
-        const button = loginButton();
-        if (button && clicks < maxLoginClicks && (!clickedAt || Date.now() - clickedAt > reclickAfterMs)) {
-          clicks += 1; clickedAt = Date.now();
-          debugLog(`clicking Log in (${clicks}/${maxLoginClicks})`);
-          await realClick(button);
-        }
-        await sleep(700);
+  // After Start Stationary, this TEMS tab keeps watching for the next hours (plain page clicks -
+  // no job is running by then, so no debugger banner):
+  //  - the driving warning -> I understand
+  //  - "Stopped in the target grid cell ... start the stationary test?" -> OK
+  //    (Cancel instead for a few minutes after Submit reopened the WO: no new stationary test)
+  //  - "Low UE NR RSRP" / "Good RSRP" -> OK
+  //  - the stage (above), reported to the app
+  function watchNotifications(hours = 8) {
+    window.kaamNotifyUntil = Date.now() + hours * 3600000;
+    if (window.kaamNotifyWatch) return;  // already watching: just keep it on longer
+    const cancelStationary = () => (window.kaamCancelStationaryUntil || 0) > Date.now();
+    const answers = [
+      { text: /do not attempt to adjust this device/i, label: () => /^i understand$/i, what: () => "driving warning: I understand",
+        skip: () => window.kaamPlaying },  // the play step clicks this one itself
+      { text: /start the stationary test/i, label: () => (cancelStationary() ? /^cancel$/i : /^ok$/i),
+        what: () => (cancelStationary() ? "stationary test: Cancel (after Submit)" : "stationary test: OK"),
+        after: () => { if (cancelStationary()) window.kaamStationaryCancelled = Date.now(); } },
+      { text: /low ue nr rsrp|change the stationary location/i, label: () => /^ok$/i, what: () => "Low UE NR RSRP: OK" },
+      { text: /good rsrp|this location is good/i, label: () => /^ok$/i, what: () => "Good RSRP: OK" },
+    ];
+    const press = (el) => {
+      const rect = el.getBoundingClientRect();
+      const at = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2, button: 0 };
+      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup"]) {
+        el.dispatchEvent(new (type.startsWith("pointer") ? PointerEvent : MouseEvent)(type, at));
       }
-      if (!isLoggedIn()) {
-        finish({ ok: false, error: "Still not logged in to TEMS Cloud. Finish the login in its popup window, then try again." });
+      el.click();
+    };
+    const lastPressed = new WeakSet();
+    let lastSent = 0;
+    window.kaamNotifyWatch = setInterval(() => {
+      resetPageScroll();  // a shifted-up TEMS page (blank gap at the bottom) goes back in place
+      if (Date.now() > window.kaamNotifyUntil) {
+        clearInterval(window.kaamNotifyWatch); window.kaamNotifyWatch = null;
         return;
       }
-    }
+      for (const answer of answers) {
+        if (answer.skip?.()) continue;
+        const el = notificationButton(answer.text, answer.label());
+        if (!el || lastPressed.has(el)) continue;
+        lastPressed.add(el);  // once per pop-up
+        debugLog(answer.what());
+        press(el);
+        answer.after?.();
+      }
+      // A stage only moves forward on screen; other TEMS pages (Assign...) show none, so keep the last.
+      const seen = stageOnScreen();
+      if (seen && seen !== window.kaamStage) { debugLog(`stage: ${seen}`); reportStage(seen); lastSent = Date.now(); }
+      else if (Date.now() - lastSent > 20000) { reportStage(); lastSent = Date.now(); }
+    }, 1000);
+  }
 
-
-    // 4. Let the Cloud list finish loading (stops changing).
-    let last = -1, stableSince = Date.now();
-    await waitFor(() => {
-      const count = assignmentCount();
-      if (count !== last) { last = count; stableSince = Date.now(); }
-      return Date.now() - stableSince > 1500;
-    }, 15000, 300);
-    const loginText = state === "out" ? "Logged in to TEMS Cloud" : "TEMS Cloud was already logged in";
-    // action: "find" (where is the WO? nothing clicked), "go" (prod: Reserve in Cloud, then Open on
-    // Assign - clicks both), "test" (cloudWo / assignWo: find the buttons, click nothing).
-    const { action = "test", wo = "", project = "", cloudWo = "", assignWo = "" } = job.data || {};
-    if (!wo && !cloudWo && !assignWo) {
-      finish({ ok: true, summary: `${loginText} - Cloud assignments loaded. (No WO, so nothing to find.)` });
-      return;
-    }
-
+  const { action = "test", wo = "", project = "", cloudWo = "", assignWo = "" } = job.data || {};
     // ---------- steps used by the actions ----------
     class Problem extends Error {}
     const goCloud = async () => {
@@ -448,6 +500,178 @@
       }
       return !!(await waitFor(changed, 12000));
     };
+
+
+  // ---------- Start Stationary when the WO isn't open (after Suspend / Discard TEMS is back on Assign) ----------
+  // Assign -> the WO's row -> Open. The app then waits until TEMS has it ready (green) and presses play.
+  const openWoForTest = async () => {
+    watchNotifications();
+    if (!wo) throw new Problem("No WO picked in Live Testing, so nothing to open on Assign.");
+    const row = await assignRowFor(wo, 8000);
+    if (!row) throw new Problem(`${wo} isn't on TEMS's Assign page.`);
+    await openAssignDetails(wo, row);
+    const openButton = await waitFor(() => detailsButton(/^(open|start)$/i), 5000);
+    if (!openButton) throw new Problem(`${wo} is on Assign, but there's no Open button.`);
+    if (!isEnabled(openButton)) throw new Problem(`${wo} is on Assign, but its ${textOf(openButton)} button is greyed out.`);
+    const opened = await press(openButton, () => !openButton.isConnected || !isVisible(openButton) ||
+      !assignDetailsShowWo(wo) || isSelected(menuButton("Control")), textOf(openButton));
+    finish({ ok: true, opened, summary: `TEMS: ${wo} opened from Assign${opened ? "" : " (no visible change yet)"}.` });
+  };
+
+  // ---------- the end of a test: Submit / Discard / Suspend ----------
+  const clickNotification = async (text, label, waitMs, what) => {
+    const button = await waitFor(() => notificationButton(text, label), waitMs, 300);
+    if (!button) return false;
+    debugLog(`${what}: ${textOf(button)}`);
+    await realClick(button);
+    await waitFor(() => !notificationButton(text, label), 5000);
+    return true;
+  };
+  const needResultPage = () => {
+    if (!resultControls()) throw new Problem("TEMS isn't showing the finished test (Submit / Discard / Suspend) - nothing pressed.");
+  };
+  // Suspend -> TEMS goes back to Assign and says "Work order summary created" -> OK.
+  const suspendRun = async () => {
+    needResultPage();
+    debugLog("pressing Suspend");
+    await realClick(resultButton(/^suspend$/i));
+    const ok = await clickNotification(/work order summary created/i, /^ok$/i, 45000, "summary created");
+    return ok ? "suspended (summary created, OK)" : "suspended (no \"summary created\" pop-up seen)";
+  };
+  // The right-hand details panel scrolled to the bottom (Grid Resource etc. in view).
+  const scrollDetailsToBottom = async () => {
+    const card = detailsCard();
+    const box = scrollBoxOf(card?.querySelector("*") || card) || scrollBoxOf(card) ||
+      (card && card.scrollHeight > card.clientHeight + 4 ? card : null);
+    if (!box) { debugLog("details panel: nothing to scroll"); return; }
+    for (let n = 0; n < 3; n++) { box.scrollTop = box.scrollHeight; await sleep(500); }
+    resetPageScroll();
+    debugLog(`details panel scrolled to ${Math.round(box.scrollTop)} of ${box.scrollHeight - box.clientHeight}`);
+    await sleep(800);  // let the map and the panel settle before the picture
+  };
+  const endRun = async (kind) => {
+    watchNotifications();
+    if (kind === "suspend") {
+      const what = await suspendRun();
+      reportStage("closed");
+      finish({ ok: true, summary: `TEMS: ${what}.` });
+      return;
+    }
+    if (kind === "discard") {
+      needResultPage();
+      debugLog("pressing Discard");
+      await realClick(resultButton(/^discard$/i));
+      const yes = await clickNotification(/discard this work order/i, /^yes$/i, 15000, "discard confirm");
+      if (!yes) throw new Problem("Pressed Discard, but TEMS didn't ask to confirm - check the TEMS tab.");
+      reportStage("closed");
+      finish({ ok: true, summary: "TEMS: discarded (confirmed Yes)." });
+      return;
+    }
+    // Submit (for now): Chrome full window, Suspend, then on Assign: the WO's details scrolled to the
+    // bottom, a picture of the page, Open it again and Cancel the stationary test it offers.
+    needResultPage();
+    await chrome.runtime.sendMessage({ type: "temsWindow", mode: "max" }).catch(() => {});
+    try {
+      await sleep(800);
+      const what = await suspendRun();
+      reportStage("closed");
+      if (!wo) throw new Problem(`${what}, but no WO is picked in Live Testing, so no picture.`);
+      const row = await assignRowFor(wo, 20000);
+      if (!row) throw new Problem(`${what}, but ${wo} isn't on Assign - no picture.`);
+      await openAssignDetails(wo, row);
+      await sleep(1500);  // the details (map, Grid Resource) load
+      await scrollDetailsToBottom();
+      const shot = await chrome.runtime.sendMessage({ type: "captureTab" }).catch(() => null);
+      if (!shot?.dataUrl) throw new Problem(`${what}, but the picture failed${shot?.error ? `: ${shot.error}` : ""}.`);
+      debugLog("picture taken");
+      // Open it again; TEMS then offers a stationary test - Cancel it (the watcher does), wait for you.
+      window.kaamCancelStationaryUntil = Date.now() + 4 * 60000;
+      window.kaamStationaryCancelled = 0;
+      const openButton = await waitFor(() => detailsButton(/^(open|start)$/i), 8000);
+      let reopened = "not reopened (no Open button)";
+      if (openButton && isEnabled(openButton)) {
+        const opened = await press(openButton, () => !openButton.isConnected || !isVisible(openButton) ||
+          !assignDetailsShowWo(wo) || isSelected(menuButton("Control")), textOf(openButton));
+        reopened = opened ? "opened again" : "Open clicked (no visible change yet)";
+        const cancelled = await waitFor(() => window.kaamStationaryCancelled, 90000, 500);
+        reopened += cancelled ? ", stationary test cancelled - waiting for you" : " - no stationary pop-up yet (it gets Cancel when it shows)";
+      }
+      finish({ ok: true, screenshot: shot.dataUrl, summary: `TEMS: ${what}, picture taken, ${reopened}.` });
+    } finally {
+      await chrome.runtime.sendMessage({ type: "temsWindow", mode: "restore" }).catch(() => {});
+    }
+  };
+
+  try {
+    resetPageScroll();  // a page left shifted by an older version: back in place first
+    if (action === "play") { watchNotifications(); reportStage("started"); await playOnControl(); return; }
+    if (action === "openWo") { await openWoForTest(); return; }
+    if (["suspend", "discard", "submit"].includes(action)) { await endRun(action); return; }
+    // 1. TEMS Paragon loaded, then the Cloud tab.
+    const cloud = await waitFor(() => menuButton("Cloud"), appWaitMs);
+    if (!cloud) {
+      finish({ ok: false, error: `TEMS Paragon didn't load at ${location.origin}. Is TEMS Paragon running?` });
+      return;
+    }
+    if (!isSelected(cloud)) {
+      debugLog("clicking Cloud");
+      cloud.click();
+      if (!(await waitFor(() => isSelected(menuButton("Cloud")), 3000))) await realClick(menuButton("Cloud") || cloud);
+    }
+
+    // 2. Logged in already, or the Log in button?
+    const state = await waitFor(() => (isLoggedIn() ? "in" : loginButton() ? "out" : null), stateWaitMs);
+    if (!state) {
+      finish({ ok: false, error: "The TEMS Cloud page didn't show its assignments or a Log in button. Check the TEMS tab." });
+      return;
+    }
+
+    // 3. Log in: click it; the popup window signs in with Chrome's saved password.
+    if (state === "out") {
+      let clicks = 0, clickedAt = 0;
+      const end = Date.now() + loginWaitMs;
+      while (Date.now() < end && !isLoggedIn()) {
+        const button = loginButton();
+        if (button && clicks < maxLoginClicks && (!clickedAt || Date.now() - clickedAt > reclickAfterMs)) {
+          clicks += 1; clickedAt = Date.now();
+          debugLog(`clicking Log in (${clicks}/${maxLoginClicks})`);
+          await realClick(button);
+        }
+        await sleep(700);
+      }
+      if (!isLoggedIn()) {
+        finish({ ok: false, error: "Still not logged in to TEMS Cloud. Finish the login in its popup window, then try again." });
+        return;
+      }
+    }
+
+
+    // 4. Let the Cloud list finish loading (stops changing).
+    let last = -1, stableSince = Date.now();
+    await waitFor(() => {
+      const count = assignmentCount();
+      if (count !== last) { last = count; stableSince = Date.now(); }
+      return Date.now() - stableSince > 1500;
+    }, 15000, 300);
+    const loginText = state === "out" ? "Logged in to TEMS Cloud" : "TEMS Cloud was already logged in";
+    // action: "find" (where is the WO? nothing clicked), "go" (prod: Reserve in Cloud, then Open on
+    // Assign - clicks both), "test" (cloudWo / assignWo: find the buttons, click nothing).
+    // listWos (the plan check after an import): every WO name in the Cloud project (scrolled to the
+    // end) and on Assign. Only the tabs and the project are clicked - nothing is reserved or opened.
+    if (action === "listWos") {
+      await openProject();
+      const cloudNames = [...(await collectNames())];
+      await goAssign();
+      const assignNames = [...(await collectNames())];
+      debugLog(`listWos: ${cloudNames.length} in ${project}, ${assignNames.length} on Assign`);
+      finish({ ok: true, cloudNames, assignNames, backToApp: true,  // back to the app to see the result
+        summary: `${loginText}. ${cloudNames.length} WOs in TEMS Cloud (${project}), ${assignNames.length} on Assign.` });
+      return;
+    }
+    if (!wo && !cloudWo && !assignWo) {
+      finish({ ok: true, summary: `${loginText} - Cloud assignments loaded. (No WO, so nothing to find.)` });
+      return;
+    }
 
     // ---------- actions ----------
     // Where is the WO in TEMS? Reads every name in the Cloud project list and on Assign, then picks

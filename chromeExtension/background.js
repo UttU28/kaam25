@@ -8,7 +8,7 @@ const extensionVersion = chrome.runtime.getManifest().version;
 
 // Keep equal to "version" in manifest.json. Chrome can keep running an old saved copy of this
 // file after an update (seen across a Chrome restart); when it does, reload to get the new code.
-const backgroundBuild = "3.33";
+const backgroundBuild = "3.42";
 if (extensionVersion !== backgroundBuild) chrome.runtime.reload();
 
 // Sends to the app. If the app says our files changed on disk, reload to pick them up.
@@ -463,6 +463,44 @@ async function handleMessage(message, sender) {
     case "log":
       debugLog(message.text, sender.tab);
       return true;
+    case "temsStage":
+      // The TEMS tab's watcher: where the test is (stationary / mobility / complete / closed). Live Testing shows it.
+      sendToBridge({ stage: "temsStage", temsStage: message.stage || "", wo: message.wo || "" });
+      return true;
+    case "captureTab": {
+      // Submit: a picture of the TEMS page as it shows now (PNG data URL). Only for a TEMS tab running a job.
+      if (!(await getJob(sender.tab))) return { error: "the TEMS tab has no job" };
+      const target = { tabId: sender.tab.id };
+      try {
+        await chrome.debugger.attach(target, "1.3");
+        const shot = await chrome.debugger.sendCommand(target, "Page.captureScreenshot", { format: "png" });
+        debugLog("picture of the TEMS page taken", sender.tab);
+        return { dataUrl: `data:image/png;base64,${shot.data}` };
+      } catch (error) {
+        debugLog(`picture failed: ${error.message}`, sender.tab);
+        return { error: error.message };
+      } finally {
+        await chrome.debugger.detach(target).catch(() => {});
+      }
+    }
+    case "temsWindow": {
+      // Submit: Chrome full window for the picture ("max"), then back as it was ("restore").
+      const windowId = sender.tab.windowId;
+      if (message.mode === "max") {
+        const win = await chrome.windows.get(windowId).catch(() => null);
+        if (!win) return false;
+        await chrome.storage.session.set({ temsWindowBefore: { state: win.state, left: win.left, top: win.top, width: win.width, height: win.height } });
+        await chrome.windows.update(windowId, { state: "maximized", focused: true }).catch(() => {});
+        return true;
+      }
+      const before = (await chrome.storage.session.get("temsWindowBefore")).temsWindowBefore;
+      if (!before) return false;
+      await chrome.storage.session.remove("temsWindowBefore");
+      if (before.state === "maximized") return true;
+      await chrome.windows.update(windowId, { state: "normal" }).catch(() => {});
+      await chrome.windows.update(windowId, { left: before.left, top: before.top, width: before.width, height: before.height }).catch(() => {});
+      return true;
+    }
     case "realClick":
       // Only for tabs running a Kaam25 job.
       if (!(await getJob(sender.tab))) {

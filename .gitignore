@@ -13,6 +13,7 @@ kaamDebug.log
 
 # Route maps contain WO locations
 maps/
+pictures/
 
 # Python
 venv/

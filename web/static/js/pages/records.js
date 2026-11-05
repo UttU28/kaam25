@@ -1,6 +1,6 @@
 // Records: everything saved in tickets.json - search, filter, edit status (saves as you change it),
 // share, move to today, delete.
-import { $, $$, api, clock, confirmBox, copyWithFlash, dayLabel, debounce, enc, esc, flash, icon, isToday, niceTime, onDataChange, refreshState, store, toast } from "../core.js";
+import { $, $$, api, clock, confirmBox, copyWithFlash, dayLabel, debounce, enc, esc, flash, icon, isToday, shortGridKey, niceTime, onDataChange, refreshState, store, toast } from "../core.js";
 import { jobPanel, locationTarget, progressBadge, seg, shareLocation, statusBadge, typeBadge, waDot } from "../components.js";
 
 const filters = [
@@ -125,7 +125,7 @@ export default {
               : "<span></span>"}
             <div class="main">
               <div class="wo" title="${esc(r.wo)}">${esc(r.wo)}</div>
-              <div class="sub">${esc(r.ticketId || "no ticket")} · ${eq}</div>
+              <div class="sub">${esc(r.ticketId || "no ticket")}${r.gridKey ? ` · <span class="gridShort" title="Grid key ${esc(r.gridKey)}${r.gridCount > 1 ? ` (+${r.gridCount - 1} more)` : ""}">${esc(shortGridKey(r.gridKey))}${r.gridCount > 1 ? ` +${r.gridCount - 1}` : ""}</span>` : ""} · ${eq}</div>
               <div class="tags">${typeBadge(r.startType)}${progressBadge(r)}</div>
             </div>
             <div class="side">${statusBadge(r.status) || ""}<span class="time">${time}</span>${r.startedAt && r.startType !== "manual" ? waDot(r) : ""}</div>
@@ -347,7 +347,12 @@ export default {
       total.value = rf.total; remarks.value = r.remarks || "";
       const att = seg([{ value: "0", label: "0" }, { value: "1", label: "1" }], rf.attempted, (v) => { skip.set(opposite(v)); save(); });
       const skip = seg([{ value: "0", label: "0" }, { value: "1", label: "1" }], rf.skipped, (v) => { att.set(opposite(v)); save(); });
-      const status = seg(["PASSED", "SKIPPED", "FAILED"].map((s) => ({ value: s, label: s })), r.status || "", () => save(), "statusSeg");
+      const status = seg(["PASSED", "SKIPPED", "FAILED"].map((s) => ({ value: s, label: s })), r.status || "", (v) => {
+        // SKIPPED = attempted 0, skipped 1; PASSED / FAILED = 1, 0 (number of grids unchanged)
+        const skipped = v === "SKIPPED";
+        att.set(skipped ? "0" : "1"); skip.set(skipped ? "1" : "0");
+        save();
+      }, "statusSeg");
       $(".eAtt", d).replaceWith(att.el); $(".eSkip", d).replaceWith(skip.el); $(".eStatus", d).replaceWith(status.el);
       total.addEventListener("change", save);
       remarks.addEventListener("change", save);

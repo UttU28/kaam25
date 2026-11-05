@@ -5,17 +5,17 @@
 import { $, api, clock, copyWithFlash, esc, icon, onDataChange, toast } from "../core.js";
 import { progressBadge, statusBadge } from "../components.js";
 
-const CATS = [
+const mapCategories = [
   { key: "completed", label: "Completed", color: "var(--green)", on: true },
   { key: "doing", label: "Doing (in progress)", pastLabel: "Started, not ended", color: "var(--amber)", on: true },
   { key: "pending", label: "To do today", color: "var(--accent)", on: true, today: true },
   { key: "missed", label: "Not driven (on that day's list)", color: "var(--red)", on: true, past: true },
 ];
-const DRIVEN = new Set(["completed", "doing"]), PLANNED = new Set(["pending"]);
-const FILTER_KEY = "kaamMapFilter", OPEN_KEY = "kaamMapFilterOpen";
-const MAX_ACC = 1500;     // metres; worse is an internet-address guess, not a position
-const EXACT_MAX = 15;     // up to this many stops the order is provably the shortest
-const OSRM = "https://router.project-osrm.org";
+const drivenStates = new Set(["completed", "doing"]), plannedStates = new Set(["pending"]);
+const filterKey = "kaamMapFilter", filterOpenKey = "kaamMapFilterOpen";
+const maxAccuracy = 1500;     // metres; worse is an internet-address guess, not a position
+const exactMax = 15;     // up to this many stops the order is provably the shortest
+const osrmUrl = "https://router.project-osrm.org";
 
 const lsGet = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
 const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch { /* storage blocked */ } };
@@ -46,12 +46,12 @@ function haversineM(a, b) {
   return 12742000 * Math.asin(Math.sqrt(h));
 }
 
-// Exact open path from node 0 through every node (Held-Karp). D is an n×n cost matrix.
-function heldKarp(D) {
-  const n = D.length, m = n - 1, full = 1 << m;
+// Exact open path from node 0 through every node (Held-Karp). costMatrix is an n×n cost matrix.
+function heldKarp(costMatrix) {
+  const n = costMatrix.length, m = n - 1, full = 1 << m;
   const dp = new Float64Array(full * m).fill(Infinity);
   const parent = new Int8Array(full * m).fill(-1);
-  for (let j = 0; j < m; j++) dp[(1 << j) * m + j] = D[0][j + 1];
+  for (let j = 0; j < m; j++) dp[(1 << j) * m + j] = costMatrix[0][j + 1];
   for (let mask = 1; mask < full; mask++) {
     for (let j = 0; j < m; j++) {
       if (!(mask & (1 << j))) continue;
@@ -59,7 +59,7 @@ function heldKarp(D) {
       if (cur === Infinity) continue;
       for (let k = 0; k < m; k++) {
         if (mask & (1 << k)) continue;
-        const next = mask | (1 << k), value = cur + D[j + 1][k + 1];
+        const next = mask | (1 << k), value = cur + costMatrix[j + 1][k + 1];
         if (value < dp[next * m + k]) { dp[next * m + k] = value; parent[next * m + k] = j; }
       }
     }
@@ -77,14 +77,14 @@ function heldKarp(D) {
 }
 
 // Near-shortest open path from node 0 for big lists: nearest neighbour, then 2-opt and move-one passes.
-function heuristic(D) {
-  const n = D.length, cost = (p) => p.slice(1).reduce((t, v, i) => t + D[p[i]][v], 0);
+function heuristic(costMatrix) {
+  const n = costMatrix.length, cost = (p) => p.slice(1).reduce((t, v, i) => t + costMatrix[p[i]][v], 0);
   const left = new Set([...Array(n).keys()].slice(1));
   let path = [0];
   while (left.size) {
     const last = path[path.length - 1];
     let best = null;
-    for (const v of left) if (best === null || D[last][v] < D[last][best]) best = v;
+    for (const v of left) if (best === null || costMatrix[last][v] < costMatrix[last][best]) best = v;
     path.push(best); left.delete(best);
   }
   let bestCost = cost(path), improved = true, rounds = 0;
@@ -106,13 +106,13 @@ function heuristic(D) {
 }
 
 // Order of `nodes` for the shortest open route. fixedStart: node 0 must come first (your location).
-export function solveOrder(D, fixedStart) {
-  let M = D;
+export function solveOrder(costMatrix, fixedStart) {
+  let solveMatrix = costMatrix;
   if (!fixedStart) {  // free start: a dummy node 0 that costs nothing to leave from anywhere
-    M = [new Array(D.length + 1).fill(0), ...D.map((row) => [0, ...row])];
+    solveMatrix = [new Array(costMatrix.length + 1).fill(0), ...costMatrix.map((row) => [0, ...row])];
   }
-  const exact = M.length - 1 <= EXACT_MAX;
-  let path = M.length <= 2 ? [...Array(M.length).keys()] : exact ? heldKarp(M) : heuristic(M);
+  const exact = solveMatrix.length - 1 <= exactMax;
+  let path = solveMatrix.length <= 2 ? [...Array(solveMatrix.length).keys()] : exact ? heldKarp(solveMatrix) : heuristic(solveMatrix);
   if (!fixedStart) path = path.slice(1).map((v) => v - 1);
   return { order: path, exact };
 }
@@ -159,8 +159,8 @@ export default {
 };
 
 function mountMap(L, root, mapEl) {
-  let filter = Object.fromEntries(CATS.map((c) => [c.key, c.on]));
-  try { Object.assign(filter, JSON.parse(lsGet(FILTER_KEY) || "{}")); } catch { /* ignore */ }
+  let filter = Object.fromEntries(mapCategories.map((c) => [c.key, c.on]));
+  try { Object.assign(filter, JSON.parse(lsGet(filterKey) || "{}")); } catch { /* ignore */ }
   let day = null, data = null, points = [], markers = {};
   let me = null, meMarker = null, meCircle = null;
   let tsp = { signature: null, keys: [], exact: true, road: true, busy: false };
@@ -183,11 +183,11 @@ function mountMap(L, root, mapEl) {
   const Filter = L.Control.extend({
     onAdd() {
       const box = L.DomUtil.create("div", "mapFilter");
-      const open = lsGet(OPEN_KEY) !== "0";
+      const open = lsGet(filterOpenKey) !== "0";
       box.innerHTML = `
         <button class="mfHead" type="button">${icon("filter", "sm")}<span>Show</span><span class="mfHidden"></span>${icon("chevron", "sm")}</button>
         <div class="mfBody ${open ? "" : "hidden"}">
-          ${CATS.map((c) => `<label class="mfRow" data-row="${c.key}"><input type="checkbox" data-cat="${c.key}" ${filter[c.key] ? "checked" : ""}>
+          ${mapCategories.map((c) => `<label class="mfRow" data-row="${c.key}"><input type="checkbox" data-cat="${c.key}" ${filter[c.key] ? "checked" : ""}>
             <span class="mfDot" style="background:${c.color}"></span><span class="mfLabel" data-label="${c.key}">${c.label}</span><b data-count="${c.key}">0</b></label>`).join("")}
           <div class="mfSep" data-today></div>
           <div class="mfRow" data-today><span class="mfDot me"></span><span class="mfLabel">Your location<small data-mestate></small></span></div>
@@ -195,11 +195,11 @@ function mountMap(L, root, mapEl) {
       box.querySelector(".mfHead").onclick = () => {
         const body = box.querySelector(".mfBody");
         body.classList.toggle("hidden");
-        lsSet(OPEN_KEY, body.classList.contains("hidden") ? "0" : "1");
+        lsSet(filterOpenKey, body.classList.contains("hidden") ? "0" : "1");
       };
       box.querySelectorAll("[data-cat]").forEach((input) => input.onchange = () => {
         filter[input.dataset.cat] = input.checked;
-        lsSet(FILTER_KEY, JSON.stringify(filter));
+        lsSet(filterKey, JSON.stringify(filter));
         paint();
       });
       L.DomEvent.disableClickPropagation(box);
@@ -256,7 +256,7 @@ function mountMap(L, root, mapEl) {
   let watchId = null;
   if ("geolocation" in navigator) {
     watchId = navigator.geolocation.watchPosition((p) => {
-      if (p.coords.accuracy > MAX_ACC) {
+      if (p.coords.accuracy > maxAccuracy) {
         if (!me) showMeState(` · only a rough guess (±${(p.coords.accuracy / 1609).toFixed(0)} mi) - use 📍 Set my spot`);
         return;
       }
@@ -267,7 +267,7 @@ function mountMap(L, root, mapEl) {
   }
 
   // ----- what goes where -----
-  const catOf = (key) => CATS.find((c) => c.key === key);
+  const catOf = (key) => mapCategories.find((c) => c.key === key);
   // "To do today" on a later day (tomorrow's plan) is just "To do".
   const dayWord = (text) => (data?.isToday === false && data?.planning ? text.replace(/ today$/, "") : text);
   const catLabel = (p) => { const c = catOf(p.category); return dayWord(!isToday() && c.pastLabel ? c.pastLabel : c.label); };
@@ -293,9 +293,9 @@ function mountMap(L, root, mapEl) {
   function sequence() {
     const vis = visiblePoints();
     const byTime = (a, b) => drivenStart(a).localeCompare(drivenStart(b));
-    const done = vis.filter((p) => isToday() ? p.category === "completed" : DRIVEN.has(p.category)).sort(byTime);
+    const done = vis.filter((p) => isToday() ? p.category === "completed" : drivenStates.has(p.category)).sort(byTime);
     const doing = isToday() ? vis.filter((p) => p.category === "doing").sort(byTime) : [];
-    const plannedAll = isToday() ? vis.filter((p) => PLANNED.has(p.category)) : [];
+    const plannedAll = isToday() ? vis.filter((p) => plannedStates.has(p.category)) : [];
     const missed = vis.filter((p) => p.category === "missed");
     const start = planStart(done, doing);
     const saved = data?.savedOrder;
@@ -384,7 +384,7 @@ function mountMap(L, root, mapEl) {
     };
     put(latlngs, true);
     if (!routeCache.has(key)) {
-      routeCache.set(key, getJSON(`${OSRM}/route/v1/driving/${key}?overview=full&geometries=geojson`)
+      routeCache.set(key, getJSON(`${osrmUrl}/route/v1/driving/${key}?overview=full&geometries=geojson`)
         .then((d) => (d.code === "Ok" ? d.routes[0] : null)).catch(() => null));
     }
     routeCache.get(key).then((r) => {
@@ -408,18 +408,18 @@ function mountMap(L, root, mapEl) {
   // Shortest drive through `stops` from `start` (road distances, straight-line if the road service is down).
   async function shortestOrder(stops, start) {
     const nodes = start ? [start, ...stops] : stops.slice();
-    let D, road = true;
+    let costMatrix, road = true;
     if (nodes.length > 1) {
       try {
-        const d = await getJSON(`${OSRM}/table/v1/driving/${nodes.map((p) => `${p.lon},${p.lat}`).join(";")}?annotations=distance`);
+        const d = await getJSON(`${osrmUrl}/table/v1/driving/${nodes.map((p) => `${p.lon},${p.lat}`).join(";")}?annotations=distance`);
         if (d.code !== "Ok") throw new Error(d.code);
-        D = d.distances.map((row, i) => row.map((v, j) => v ?? haversineM(nodes[i], nodes[j]) * 1.4));
+        costMatrix = d.distances.map((row, i) => row.map((v, j) => v ?? haversineM(nodes[i], nodes[j]) * 1.4));
       } catch {
         road = false;
-        D = nodes.map((a) => nodes.map((b) => haversineM(a, b)));
+        costMatrix = nodes.map((a) => nodes.map((b) => haversineM(a, b)));
       }
-    } else D = [[0]];
-    const { order, exact } = solveOrder(D, Boolean(start));
+    } else costMatrix = [[0]];
+    const { order, exact } = solveOrder(costMatrix, Boolean(start));
     const keys = order.map((i) => nodes[i]).filter((p) => !start || p !== start).map((p) => p.key);
     return { keys, exact, road };
   }
@@ -456,7 +456,7 @@ function mountMap(L, root, mapEl) {
     if (!data.savedOrder?.length && plannedAll.length && mode !== "shortest") planShortest(plannedAll, start);
 
     // filter rows: counts, and only the groups that make sense for this day
-    CATS.forEach((c) => {
+    mapCategories.forEach((c) => {
       filterBox.querySelector(`[data-row="${c.key}"]`).classList.toggle("hidden", !applies(c));
       filterBox.querySelector(`[data-count="${c.key}"]`).textContent = points.filter((p) => p.category === c.key).length;
       filterBox.querySelector(`[data-label="${c.key}"]`).textContent = dayWord(!isToday() && c.pastLabel ? c.pastLabel : c.label);
@@ -475,7 +475,7 @@ function mountMap(L, root, mapEl) {
       const m = markers[p.key];
       m.setLatLng([p.lat, p.lon]);
       m.setIcon(L.divIcon({ className: "", iconSize: [30, 30], iconAnchor: [15, 15], popupAnchor: [0, -14], html: badgeHtml(p, n) }));
-      m.setZIndexOffset(p.category === "doing" ? 600 : PLANNED.has(p.category) ? 300 : 0);
+      m.setZIndexOffset(p.category === "doing" ? 600 : plannedStates.has(p.category) ? 300 : 0);
       m.getPopup().setContent(popupHtml(p, n));
     });
     if (firstFit && shown) { firstFit = false; fitVisible(); }

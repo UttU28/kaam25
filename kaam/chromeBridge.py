@@ -122,6 +122,16 @@ def writeDebugLog(message):
         pass
 
 
+# Where the TEMS test is, as the TEMS tab's watcher last said (it repeats every 20 s while it watches):
+# "started", "stationary" (running), "mobility" (stationary done), "complete" (all done:
+# Submit / Discard / Suspend showing), "closed" (one of those pressed). Live Testing reads it.
+temsStage = {"stage": "", "wo": "", "at": 0.0}
+
+
+def setTemsStage(stage, wo=""):
+    temsStage.update(stage=stage, wo=wo or temsStage.get("wo", ""), at=time.time())
+
+
 def registerFiles(requestId, paths):
     """Let the extension fetch these files (and only these) for this request."""
     with messagesCondition:
@@ -204,6 +214,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             writeDebugLog(message)
         elif message.get("stage") == "ping":
             pass  # the extension checking in; the reply below tells it to reload if it's out of date
+        elif message.get("stage") == "temsStage":
+            setTemsStage(message.get("temsStage") or "", message.get("wo") or "")
         else:
             with messagesCondition:
                 if requestId in pendingMessages:  # ignore anything we didn't ask for

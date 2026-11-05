@@ -1,6 +1,6 @@
 // Settings: edit every .env value (checked, saved after you confirm, then the app restarts
 // itself) and the Chrome extension connection.
-import { $, $$, ago, api, esc, icon, modal, niceTime, setWhatsappSend, store, toast } from "../core.js";
+import { $, $$, ago, api, copyWithFlash, esc, icon, modal, niceTime, setWhatsappSend, store, toast } from "../core.js";
 import { switchEl } from "../components.js";
 
 const monoTypes = new Set(["url", "email", "dir", "path", "list", "readonly"]);
@@ -85,7 +85,9 @@ export default {
       }
       return `<div class="field setField" data-field="${f.key}">
           <label class="label" for="${id}">${esc(f.label)}<span class="setKey">${esc(f.key)}</span></label>
-          ${control}${f.help ? `<div class="note">${esc(f.help)}</div>` : ""}</div>`;
+          ${control}${f.help ? `<div class="note">${esc(f.help)}</div>` : ""}
+          ${f.command ? `<div class="setCmd"><span class="note">Get both IDs: run this in a terminal - the ID is the first column</span>
+            <code>${esc(f.command)}</code><button class="iconBtn sm copyCmd" data-cmd="${esc(f.command)}" title="Copy the command">${icon("copy", "sm")}</button></div>` : ""}</div>`;
     }
 
     // ----- controls -----
@@ -111,6 +113,7 @@ export default {
     }
     paint();
 
+    $$(".copyCmd", root).forEach((button) => button.addEventListener("click", () => copyWithFlash(button, button.dataset.cmd)));
     $(".reset", root).addEventListener("click", () => {
       Object.assign(values, original);
       $$(".setGroups [data-key]", root).forEach((input) => { input.value = original[input.dataset.key]; });

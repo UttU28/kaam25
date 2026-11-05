@@ -85,9 +85,19 @@ export default {
             <div class="woSlot"></div>
             <div class="pair">
               <button class="btn btnPrimary lg" data-action="desk" title="Unlocks the phones, sets up Service Mode + Speedtest and Vysor where missing (skips what is already done), Chrome on the left half, TMO 1 and TMO 2 a quarter each on the right">${icon("desk")}<span>Set up desk</span></button>
-              <button class="btn btnPurple lg" data-action="temsPlay" title="TEMS Paragon: opens Control and presses play (only when TEMS shows it ready, green) - then stays on TEMS">${icon("play")}<span>Start ticket</span></button>
-              <button class="btn btnGreen lg" data-action="fullTestAll" title="Each phone in turn, NR phones first then LTE: Service Mode + Speedtest, airplane toggle, speed test, wait for the result - then the next phone">${icon("gauge")}<span>Test all, one by one</span></button>
+              <button class="btn btnGhost lg" data-action="closePhones" title="Closes the TMO 1 and TMO 2 windows in Vysor (the phones keep running) - press Set up desk to open them again">${icon("x")}<span>Close phones</span></button>
+              <button class="btn btnGhost lg" data-action="hotspot" title="Turns Mobile Hotspot on on the phone with the best network right now (NR first, then the stronger signal) and off on the other one. Same name and password on both, so devices just reconnect. It never switches by itself.">${icon("hotspot")}<span>Hotspot</span></button>
+              <button class="btn btnPurple lg" data-action="temsPlay" title="Closes and reopens the phones; in TEMS opens the WO from Assign if it isn't open, waits till it's ready (green), then Control and play - then stays on TEMS">${icon("play")}<span class="temsPlayLabel">Start Stationary</span></button>
+              <button class="btn btnGreen lg" data-action="fullTestAll" title="Each phone in turn, NR phones first then LTE: Service Mode + Speedtest, airplane toggle, speed test, wait for the result - then the next phone">${icon("gauge")}<span>Test All</span></button>
             </div>
+            </div>
+            <div class="temsEnd" hidden>
+              <div class="temsEndText">${icon("check", "sm")}<span><b>TEMS: stationary and mobility done.</b> What now?</span></div>
+              <div class="temsEndBtns">
+                <button class="btn btnGreen" data-tems="submit" title="For now: Chrome full window, Suspend in TEMS, a picture of the WO's details on Assign (saved in the pictures folder and on the WO, used for WhatsApp), open it again and Cancel the stationary test - then it waits for you">${icon("check", "sm")}<span>Submit</span></button>
+                <button class="btn btnGhost" data-tems="discard" title="Discard in TEMS (and Yes to its confirm)">${icon("x", "sm")}<span>Discard</span></button>
+                <button class="btn btnGhost" data-tems="suspend" title="Suspend in TEMS (and OK to its &quot;summary created&quot;)">${icon("pause", "sm")}<span>Suspend</span></button>
+              </div>
             </div>
             <div class="liveHint allHint"></div>
             <div class="msg"></div>
@@ -101,7 +111,7 @@ export default {
         <div class="card liveWo">
           <div class="cardHead"><h2>Results on this WO</h2><span class="hint woHint"></span></div>
           <div class="cardBody stack">
-            <div class="kv info"></div>
+            <div class="kv woInfo"></div>
             <div class="techSummary"></div>
             <div class="tests"></div>
           </div>
@@ -132,9 +142,11 @@ export default {
     });
     q(".woSlot").replaceWith(box.el);
     // ---------- WO and its saved tests ----------
-    // Once TEMS has made the WO's result file (GridSummary), its speed results are done with: not shown.
+    // Once TEMS has made the WO's result file (GridSummary), the speed results from before it are done
+    // with: not shown. Tests run after it (driving the WO again) show as usual.
     const finished = () => Boolean(record?.resultReady);
-    const tests = () => (finished() ? [] : record?.speedTests || []);
+    const afterResult = (t) => !finished() || (record.resultAt && new Date(t?.at) > new Date(record.resultAt));
+    const tests = () => (record?.speedTests || []).filter(afterResult);
     function best(filter) {
       let top = null;
       for (const t of tests()) if (filter(t) && mbps(t) > mbps(top)) top = t;
@@ -144,7 +156,7 @@ export default {
     function paintWo() {
       const r = record;
       q(".woHint").textContent = wo ? `${tests().length} test${tests().length === 1 ? "" : "s"}` : "";
-      q(".info").innerHTML = r ? [
+      q(".woInfo").innerHTML = r ? [
         ["Ticket", r.ticketId || "—"], ["Cluster", r.cluster || "—"], ["Grid key", r.gridKey || "—"], ["Location", r.location || "—"],
       ].map(([k, v]) => `<div><div class="k">${k}</div><div class="v" title="${esc(v)}">${esc(v)}</div></div>`).join("") : "";
       if (!wo) {
@@ -152,7 +164,7 @@ export default {
         q(".tests").innerHTML = `<div class="callout info">${icon("info", "sm")}<div>Pick the WO you're driving to save the speed results on it. Tests still run without one.</div></div>`;
         return;
       }
-      if (finished()) {
+      if (finished() && !tests().length) {
         q(".techSummary").innerHTML = "";
         q(".tests").innerHTML = `<div class="callout ok">${icon("check", "sm")}<div>TEMS has made the result file for this WO, so its speed results are cleared. Pick the WO you're driving now.</div></div>`;
         return;
@@ -236,12 +248,12 @@ export default {
         ? `Phone split ${Math.round(info.splitRatio * 100)}:${100 - Math.round(info.splitRatio * 100)} (Service Mode : Speedtest) · airplane ${info.airplaneSeconds}s in Full test · phones are unlocked automatically`
         : "Checking phones…";
       q(".msg").innerHTML = info?.adbError ? callout(info.adbError, "bad")
-        : info && !phones.length ? callout("No phones set up. Add PHONES=TMO 1=<serial>,TMO 2=<serial> in .env.", "warn")
-        : info?.unconfigured?.length ? callout(`Connected but not in PHONES: ${info.unconfigured.join(", ")}`, "info") : "";
+        : info && !phones.length ? callout("No phones set up. Add the TMO 1 / TMO 2 serials in Settings > Phones.", "warn")
+        : info?.unconfigured?.length ? callout(`Connected but not set as TMO 1 / TMO 2 (Settings > Phones): ${info.unconfigured.join(", ")}`, "info") : "";
       q(".phones").innerHTML = phones.map((p) => {
         // Latest result: this browser's last one, or the newest saved on the WO (e.g. run from another tab).
         const savedLatest = tests().filter((t) => t.phone === p.name).slice(-1)[0];
-        const mine = last[p.name] && "wo" in last[p.name] && last[p.name].wo === wo && !finished() ? last[p.name] : null;
+        const mine = last[p.name] && "wo" in last[p.name] && last[p.name].wo === wo && afterResult(last[p.name]) ? last[p.name] : null;
         const r = [mine, savedLatest].filter(Boolean)
           .sort((a, b) => new Date(b.at) - new Date(a.at))[0];
         const onWo = tests().filter((t) => t.phone === p.name && !t.error);
@@ -282,7 +294,7 @@ export default {
             </div>
           </div>`;
       }).join("");
-      for (const b of root.querySelectorAll("button[data-action='desk'], button[data-action='fullTestAll']")) b.disabled = busy;
+      for (const b of root.querySelectorAll("button[data-action='desk'], button[data-action='closePhones'], button[data-action='hotspot'], button[data-action='fullTestAll']")) b.disabled = busy;
     }
 
     // Live signal: only the chip and the strip change (buttons stay put while you press them).
@@ -301,19 +313,70 @@ export default {
       sigTimer = setTimeout(pollSignal, 700);
     }
 
-    // Start ticket: TEMS's Control page, press play there (the server checks TEMS is ready first).
+    // Start Stationary: phones reopened; TEMS opens the WO from Assign if needed, waits till it's
+    // green, then Control and play (the server checks TEMS's state first).
     let temsBusy = false;
-    async function startTems(button) {
+    async function temsJob(body, buttons) {
       if (temsBusy) return;
-      temsBusy = true; button.disabled = true;
+      temsBusy = true; buttons.forEach((b) => (b.disabled = true));
+      let linesShown = 0;
       try {
-        const { job: started } = await api("/api/tems", { body: { action: "play" } });
-        const done = await job.run(started);
+        const { job: started } = await api("/api/tems", { body });
+        const done = await job.run(started, (j) => {
+          (j.lines || []).slice(linesShown).forEach((line) => stepToast(line.text));
+          linesShown = (j.lines || []).length;
+        });
         const text = done.state === "done" ? (done.result?.summary || done.result?.error) : done.error || "Stopped.";
-        toast(text, done.state === "done" && done.result?.ok !== false ? "ok" : "bad", 8000);
+        toast(text, done.state === "done" && done.result?.ok !== false ? "ok" : "bad", 10000);
       } catch (error) { toast(error.message, "bad", 8000); }
-      finally { temsBusy = false; button.disabled = busy; }
+      finally { temsBusy = false; buttons.forEach((b) => (b.disabled = false)); pollStage(true); }
     }
+    const startTems = (button) => temsJob({ action: "play", wo }, [button]);
+
+    // ---------- where the TEMS test is (the TEMS tab reports it) ----------
+    // started / stationary -> "Start Stationary"; mobility (stationary done) -> "Start Mobility" + beep;
+    // complete -> Submit / Discard / Suspend show (+ beep); closed -> back to "Start Stationary".
+    let stage = "", stageTimer = null, audio = null;
+    root.addEventListener("pointerdown", () => {  // browsers only allow sound after a click on the page
+      try { audio = audio || new (window.AudioContext || window.webkitAudioContext)(); audio.resume?.(); } catch { /* no sound */ }
+    });
+    function beep(times = 1) {
+      try {
+        audio = audio || new (window.AudioContext || window.webkitAudioContext)();
+        for (let n = 0; n < times; n++) {
+          const tone = audio.createOscillator(), gain = audio.createGain(), at = audio.currentTime + n * 0.22;
+          tone.frequency.value = 880; gain.gain.setValueAtTime(0.18, at); gain.gain.exponentialRampToValueAtTime(0.001, at + 0.16);
+          tone.connect(gain).connect(audio.destination); tone.start(at); tone.stop(at + 0.17);
+        }
+      } catch { /* no sound */ }
+    }
+    function showStage(next) {
+      const changed = next !== stage;
+      const before = stage;
+      stage = next;
+      q(".temsPlayLabel").textContent = stage === "mobility" ? "Start Mobility" : "Start Stationary";
+      q(".temsEnd").hidden = stage !== "complete";
+      if (!changed || !before) return;  // first read on opening the page: no sound
+      if (stage === "mobility") { beep(1); toast("TEMS: stationary test done - drive to start mobility.", "ok", 8000); }
+      if (stage === "complete") { beep(2); toast("TEMS: stationary and mobility done - Submit, Discard or Suspend.", "ok", 10000); }
+    }
+    async function pollStage(once = false) {
+      if (!document.hidden) {
+        try {
+          const now = await api("/api/tems/stage");
+          // The TEMS tab repeats its stage every 20 s; older than 2 min = it stopped watching (reloaded).
+          showStage(now.age != null && now.age < 120 ? now.stage : "");
+        } catch { /* server busy: keep what we show */ }
+      }
+      if (!once) stageTimer = setTimeout(pollStage, 2000);
+    }
+    q(".temsEnd").addEventListener("click", (e) => {
+      const button = e.target.closest("button[data-tems]");
+      if (!button || button.disabled) return;
+      const kind = button.dataset.tems;
+      if (kind === "discard" && !confirm(`Discard ${wo || "this WO"} in TEMS? Its test run is thrown away.`)) return;
+      temsJob({ action: kind, wo }, [...q(".temsEnd").querySelectorAll("button")]);
+    });
 
     async function loadPhones() {
       try { info = await api("/api/live/phones"); } catch (error) { info = { phones: [], adbError: error.message }; }
@@ -381,7 +444,8 @@ export default {
     else pickDefaultWo();
     timer = setInterval(() => { if (!busy && !document.hidden) { loadPhones(); reloadRecord(); } }, 8000);
     pollSignal();
-    return () => { clearInterval(timer); clearTimeout(sigTimer); temsMap.destroy(); };
+    pollStage();
+    return () => { clearInterval(timer); clearTimeout(sigTimer); clearTimeout(stageTimer); temsMap.destroy(); };
   },
 };
 

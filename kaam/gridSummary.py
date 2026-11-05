@@ -63,19 +63,26 @@ def findWorkOrderFolder(wo, baseDir=workOrderOutputDir):
 readyCache = {}  # wo -> (checkedAt, ready)
 
 
-def resultReady(wo, cacheSeconds=5):
-    """True once TEMS has written this WO's result - GridSummary.csv in its newest run folder, or
-    our renamed copy of it. Until then the WO is still being driven (Live Testing), not ready to End."""
+def resultTime(wo, cacheSeconds=5):
+    """When TEMS wrote this WO's result (epoch seconds) - GridSummary.csv in its newest run folder, or
+    our renamed copy of it - else None (the WO is still being driven, not ready to End)."""
     hit = readyCache.get(wo)
     if hit and time.time() - hit[0] < cacheSeconds:
         return hit[1]
     try:
         runFolder = findLatestRunFolder(findWorkOrderFolder(wo))
-        ready = (runFolder / gridSummaryFile).is_file() or             any(runFolder.glob(f"*_{employeeId}_{folderNamePrefix}{wo}.csv"))
+        files = [runFolder / gridSummaryFile, *runFolder.glob(f"*_{employeeId}_{folderNamePrefix}{wo}.csv")]
+        times = [f.stat().st_mtime for f in files if f.is_file()]
+        made = min(times) if times else None
     except Exception:
-        ready = False
-    readyCache[wo] = (time.time(), ready)
-    return ready
+        made = None
+    readyCache[wo] = (time.time(), made)
+    return made
+
+
+def resultReady(wo, cacheSeconds=5):
+    """True once TEMS has written this WO's result. Until then it's still being driven."""
+    return resultTime(wo, cacheSeconds) is not None
 
 
 def copyGridSummary(wo):

@@ -23,18 +23,18 @@ fields = [
     ("EMPLOYEE_ID", "You", "Employee / team ID", "text", "Only your team's rows are imported from the day's plan, e.g. N071.", {}),
     ("MICROSOFT_ACCOUNT", "You", "Microsoft account", "email", "Picked on Microsoft's \"Pick an account\" page when signing in to ActixOne.", {}),
     ("ACTIX_EXTRA_EMAIL", "You", "Extra email on ActixOne uploads", "email", "Added on the ActixOne upload page.", {}),
+    # ---------- TEMS ----------
+    ("TEMS_PROJECT", "TEMS", "TEMS Cloud project", "text", "Project that lists the WOs to reserve (changes each month).", {"optional": True, "default": temsProject}),
+    ("TEMS_URL", "TEMS", "TEMS Paragon address", "url", "The extension only works on http://localhost:8080/.", {"optional": True, "default": temsUrl}),
+    ("TEMS_DATA_URL", "TEMS", "TEMS map data address", "url",
+     "TEMS's own map data service on this PC - Live Testing reads its map from here (read only).",
+     {"optional": True, "default": "http://localhost:8181"}),
     # ---------- Start Ticket ----------
     ("DEFAULT_REGION", "Start Ticket", "Region", "text", "Region on the Create Ticket form.", {}),
     ("DEFAULT_MARKET", "Start Ticket", "Market", "text", "Market on the Create Ticket form.", {}),
     ("DEFAULT_LOGS_UPLOADED_PREVIOUS_DAY", "Start Ticket", "Logs uploaded from previous day", "choice", "Dropdown on the Create Ticket form.", {"options": ["Yes", "No"]}),
     ("DRIVE_SHIFT_PM_FROM", "Start Ticket", "PM shift from", "time", "Drive Shift is PM from this time (24h), AM before it.", {}),
     ("DEFAULT_SUBMIT", "Start Ticket", "Click Create", "bool", "On: clicks Create and finds the new Ticket ID. Off: only fills the form.", {}),
-    # ---------- End Ticket report ----------
-    ("DEFAULT_TOTAL_GRIDS", "End Ticket report", "Total grids", "int", "", {"min": 0, "max": 999}),
-    ("DEFAULT_ATTEMPTED", "End Ticket report", "Grids attempted", "choice", "", {"options": ["0", "1"]}),
-    ("DEFAULT_SKIPPED", "End Ticket report", "Grids skipped", "choice", "", {"options": ["0", "1"]}),
-    ("DEFAULT_STATUS", "End Ticket report", "Status", "choice", "", {"options": ["PASSED", "SKIPPED", "FAILED"]}),
-    ("FOLDER_NAME_PREFIX", "End Ticket report", "Folder name prefix", "text", "Folder name: <MMDDYYYY>_<ID>_<prefix><WO>. Spaces are kept.", {"keepSpaces": True}),
     # ---------- Files ----------
     ("LOG_ROOT_DIR", "Files", "Drive logs folder", "dir", "Logs come from <folder>\\<EQ>\\Cloud WO - <WO>\\<newest run>.", {}),
     ("EQUIPMENTS", "Files", "Equipments", "list", "Comma-separated, uploaded in this order, e.g. EQ3,EQ6.", {}),
@@ -42,24 +42,12 @@ fields = [
     ("GRID_SUMMARY_FILE", "Files", "GridSummary file name", "text", "", {}),
     ("TICKET_STORE_FILE", "Files", "Records file", "path", "Where all records are saved. Relative = inside the app folder.", {}),
     ("DEBUG_LOG_FILE", "Files", "Debug log", "path", "Relative = inside the app folder.", {}),
-    # ---------- Automation ----------
-    ("ACTIX_SUBMIT", "Automation", "ActixOne: click Submit", "bool", "On: submits and saves the Job ID. Off: stops before Submit.", {}),
-    ("CLOSE_TABS_WHEN_DONE", "Automation", "Close tabs when done", "bool", "Close a tab the app opened once its job fully finished.", {}),
-    # ---------- TEMS ----------
-    ("TEMS_PROJECT", "TEMS", "TEMS Cloud project", "text", "Project that lists the WOs to reserve (changes each month).", {"optional": True, "default": temsProject}),
-    ("TEMS_URL", "TEMS", "TEMS Paragon address", "url", "The extension only works on http://localhost:8080/.", {"optional": True, "default": temsUrl}),
-    ("TEMS_DATA_URL", "TEMS", "TEMS map data address", "url",
-     "TEMS's own map data service on this PC - Live Testing reads its map from here (read only).",
-     {"optional": True, "default": "http://localhost:8181"}),
     # ---------- Phones (Live Testing) ----------
-    ("PHONES", "Phones", "Test phones", "text",
-     "Name=serial for each phone, comma-separated, in screen order: TMO 1=<serial>,TMO 2=<serial>. "
-     "Serials: run  adb devices  or look in Vysor. Names must match the phone names in Vysor.",
-     {"optional": True, "default": "TMO 1=<serial>,TMO 2=<serial>"}),
+    ("PHONE_TMO1", "Phones", "TMO 1 serial", "text", "", {"optional": True}),
+    ("PHONE_TMO2", "Phones", "TMO 2 serial", "text",
+     "Each phone's ID (serial). In Vysor the phones must be named TMO 1 / TMO 2.", {"optional": True, "command": "adb devices"}),
     ("PHONE_SPLIT_RATIO", "Phones", "Service Mode share of the screen", "text",
      "Split screen: Service Mode on top, Speedtest below. 0.70 = 70:30.", {"optional": True, "default": "0.70"}),
-    ("PHONE_AIRPLANE_SECONDS", "Phones", "Airplane seconds", "int", "How long airplane mode stays on in Full test / Airplane.",
-     {"optional": True, "default": "5", "min": 1, "max": 60}),
     ("PHONE_SPEEDTEST_LABEL", "Phones", "Speedtest icon name", "text",
      "Name of the Speedtest shortcut on the phones' home screen (else speedtest.net opens in Chrome).",
      {"optional": True, "default": "Speedtest"}),
@@ -76,6 +64,9 @@ fields = [
     # ---------- Web pages ----------
     ("TICKETS_URL", "Web pages", "TechInsights tickets page", "url", "", {}),
     ("ACTIX_UPLOAD_URL", "Web pages", "ActixOne upload page", "url", "", {}),
+    ("TEAMS_URL", "Web pages", "Teams link", "url",
+     "The Teams button at the top of every page (left of the search) opens this in a new tab - e.g. your Teams meeting link. Empty: no button.",
+     {"optional": True, "default": ""}),
     ("APEKSHA_ENABLED", "Web pages", "Use Apeksha", "bool",
      "On: the WO box's QR icon posts the WO's Google Maps link to Apeksha. Off (default): it shows the link as a QR code (scan to open the spot), with the link and lat / long.",
      {"optional": True, "default": "false"}),
@@ -118,13 +109,9 @@ def check(key, value):
     value = value if extra.get("keepSpaces") else str(value).strip()
     if not value.strip():
         return value, None if extra.get("optional") or kind == "readonly" else f"{label} can't be empty.", None
-    if key == "PHONES":
-        items = [item.strip() for item in value.split(",") if item.strip()]
-        bad = [item for item in items if "=" not in item or not all(part.strip() for part in item.split("=", 1))]
-        if bad:
-            return value, f"{label}: write each phone as Name=serial, comma-separated (e.g. TMO 1=R5CY93EAZBH,TMO 2=R5GYB25TW5R).", None
-        if any("<serial>" in item for item in items):
-            return value, None, f"{label}: replace <serial> with each phone's serial (adb devices)."
+    if key in ("PHONE_TMO1", "PHONE_TMO2"):
+        if not re.fullmatch(r"[A-Za-z0-9._:-]+", value):
+            return value, f"{label}: just the ID from  adb devices  (letters and numbers, e.g. R5CY93EAZBH).", None
     if key == "PHONE_SPLIT_RATIO":
         try:
             ratio = float(value)

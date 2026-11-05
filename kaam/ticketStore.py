@@ -89,7 +89,7 @@ ticketFields = (
     "ticketId", "startTicketId", "endTicketId", "ticketVerified", "startedAt", "submitted", "driveShift",
     "startType", "localGridNumber",
     "folderName", "endedAt", "eq3", "eq6", "status", "totalGrids", "attempted", "skipped", "remarks",
-    "gridSummaryPath", "whatsappSentAt", "woDoneSentAt", "closeStep1At", "closeStep2At", "closeStep3At", "closedAt", "speedTests",
+    "gridSummaryPath", "picturePath", "pictureAt", "pictureSource", "whatsappSentAt", "woDoneSentAt", "closeStep1At", "closeStep2At", "closeStep3At", "closedAt", "speedTests",
 )
 
 
@@ -273,8 +273,9 @@ def importWorkOrders(rows, sourceName):
     A row in the plan's spelling of a WO TEMS has differently (G23d in the sheet, G23e in TEMS)
     updates the record under its TEMS name - started or not, no copy is added - and the sheet's
     spelling is kept on it as "excelWo".
-    Returns (added, updated, alreadyStarted) counts."""
+    Returns (added, updated, alreadyStarted, names): the counts, and each row's WO as Records has it."""
     added = updated = alreadyStarted = 0
+    names = []
     with storeLock:
         tickets = readFile()
         renamed = excelKeys(tickets)
@@ -305,8 +306,10 @@ def importWorkOrders(rows, sourceName):
             record.setdefault("history", []).append({"at": stamp, "event": f"Imported from {sourceName}"})
             record["history"] = record["history"][-maxHistory:]
             tickets[key] = record
+            if record["wo"] not in names:
+                names.append(record["wo"])
         writeFile(tickets)
-    return added, updated, alreadyStarted
+    return added, updated, alreadyStarted, names
 
 
 def renameWo(oldWo, newWo):
@@ -430,7 +433,9 @@ def notStartedRecords(onlyToday=True):
     """Imported but not started yet, in sheet order (latest import first) - Start Ticket's list.
     A WO moved to today counts as imported at that moment, so it sits with today's plan.
     onlyToday: just the ones imported or moved to today; older pending WOs stay in Records until
-    you move them to today."""
+    you move them to today.
+    WOs the plan check didn't find in TEMS ("Not in TEMS") are left out until a recheck finds them -
+    they can't be driven yet. Today's "Waiting on TEMS" card lists them."""
     with storeLock:
         records = list(readFile().values())
 
@@ -439,6 +444,7 @@ def notStartedRecords(onlyToday=True):
 
     today = datetime.now().date().isoformat()
     waiting = [record for record in records if record.get("importedAt") and not record.get("startedAt")
+               and record.get("temsCheck") != "missing"
                and (not onlyToday or listedAt(record).startswith(today))]
 
     return sorted(waiting, key=lambda record: (-datetime.fromisoformat(listedAt(record)).timestamp(),

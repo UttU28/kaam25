@@ -52,6 +52,8 @@ const paths = {
   folder: '<path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2z"/>',
   x: '<path d="M18 6 6 18M6 6l12 12"/>',
   check: '<path d="M20 6 9 17l-5-5"/>',
+  teams: '<rect x="2" y="7" width="12" height="11" rx="2"/><path d="M5.5 10.5h5M8 10.5V15"/><circle cx="17.5" cy="6" r="2.2"/><circle cx="10" cy="4" r="1.8"/><path d="M16 10h5v4.5a3 3 0 0 1-5 2.2"/>',
+  pause: '<rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/>',
   alert: '<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3z"/><path d="M12 9v4M12 17h.01"/>',
   info: '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/>',
   cloud: '<path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9z"/>',
@@ -75,6 +77,7 @@ const paths = {
   file: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/>',
   eraser: '<path d="m7 21-4.3-4.3c-1-1-1-2.5 0-3.4l9.6-9.6c1-1 2.5-1 3.4 0l5.6 5.6c1 1 1 2.5 0 3.4L13 21"/><path d="M22 21H7M5 11l9 9"/>',
   phone: '<rect x="6" y="2" width="12" height="20" rx="2.5"/><path d="M11 18h2"/>',
+  hotspot: '<circle cx="12" cy="12" r="1.5"/><path d="M8.5 15.5a5 5 0 0 1 0-7M15.5 8.5a5 5 0 0 1 0 7M5.6 18.4a9 9 0 0 1 0-12.8M18.4 5.6a9 9 0 0 1 0 12.8"/>',
   plane: '<path d="M17.8 19.2 16 11l3.5-3.5C21 6 21.5 4 21 3c-1-.5-3 0-4.5 1.5L13 8 4.8 6.2c-.5-.1-.9.1-1.1.5l-.3.5c-.2.5-.1 1 .3 1.3L9 12l-2 3H4l-1 1 3 2 2 3 1-1v-3l3-2 3.5 5.3c.3.4.8.5 1.3.3l.5-.2c.4-.3.6-.7.5-1.2z"/>',
   gauge: '<path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/>',
   desk: '<rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4M11 4v13"/>',
@@ -247,6 +250,14 @@ export function formatReport(f) {
   if (g("remarks")) text += `\n\nREMARKS: ${g("remarks")}`;
   return text;
 }
+// Short grid key for lists: 483479503021_00029_00016 -> 21_29_16 (last 2 digits of the first
+// part, then the other parts without their leading zeros). Anything else is shown as it is.
+export function shortGridKey(key) {
+  const parts = String(key || "").trim().split("_");
+  if (parts.length < 2 || !parts.every((p) => /^\d+$/.test(p))) return String(key || "").trim();
+  return [parts[0].slice(-2), ...parts.slice(1).map((p) => p.replace(/^0+(?=\d)/, ""))].join("_");
+}
+
 export function cleanWo(text) {
   return String(text || "").replace(/^\s*(?:cloud\s*wo\s*-\s*|wo\s*:\s*)/i, "").trim();
 }

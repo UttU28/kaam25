@@ -18,13 +18,14 @@ projectDir = Path(__file__).resolve().parent.parent
 if str(projectDir) not in sys.path:
     sys.path.insert(0, str(projectDir))  # so "python web/server.py" works too
 
-from flask import Flask, jsonify, request, send_from_directory  # noqa: E402
+from flask import Flask, jsonify, request, send_file, send_from_directory  # noqa: E402
 
 from kaam import config, envSettings, workflows  # noqa: E402
 from kaam.chromeBridge import ChromeBridgeError, bridgeStatus, openInChrome, startBridge, stopAll  # noqa: E402
 from kaam.gridSummary import buildFolderName, showInExplorer  # noqa: E402
 from kaam.sheetImport import SheetImportError  # noqa: E402
 from kaam.temsParagon import actions as temsActions, runTems  # noqa: E402
+from kaam.pictures import PictureError, pictureInfo, pictureOf, savePicture  # noqa: E402
 from kaam.ticketLookup import currentDriveShift  # noqa: E402
 from kaam.ticketStore import (TicketStoreError, cloudStartToday, deleteNotStarted, deleteRecord, fileStamp,  # noqa: E402
                               getRecord, isLocalStart, localTicketId, markDone, moveToToday, nextLocalNumber, notStartedRecords,
@@ -119,6 +120,8 @@ def detail(record):
         "isLocal": isLocalStart(record),
         # TEMS has made the WO's result file (GridSummary): it's done driving
         "resultReady": bool(record.get("startedAt")) and readyToEnd(record),
+        # when that file was made: Live Testing hides only the speed tests from before it
+        "resultAt": resultAt(record) if record.get("startedAt") else None,
         "report": workflows.reportFromRecord(record) if record.get("startedAt")
         else workflows.formatLocationPreview(record.get("wo", ""), record),
         "reportFields": workflows.reportFieldsFromRecord(record),
@@ -127,6 +130,8 @@ def detail(record):
         "close": workflows.closeState(record),
         "history": list(reversed(record.get("history") or [])),
         "previousTickets": record.get("previousTickets") or [],
+        # the TEMS picture (required for the WhatsApp share): where it's saved and when
+        "picture": pictureInfo(record),
     })
     return data
 
@@ -178,6 +183,7 @@ def state():
             "driving": sum(1 for r in openToday if not readyToEnd(r)),  # Live Testing: still driving
             "completedToday": sum(1 for r in todays if r.get("endedAt")),
             "toStart": len(notStartedRecords()),
+            "notInTems": len(notInTemsRecords()),  # waiting for the coordinators to add them in TEMS
             "readyToClose": sum(1 for r in records if workflows.isReadyToClose(r)),
             "whatsappPending": sum(1 for r in todays if r.get("endedAt") and not r.get("whatsappSentAt")
                                    and r.get("startType") != "manual"),
@@ -229,7 +235,8 @@ def wosForDay(dayText, records=None):
             picked[woKey(record.get("wo"))] = (record, "completed" if record.get("endedAt") else "doing")
     for record in records:  # the day's list, as in Records (imported / moved / created that day)
         key = woKey(record.get("wo"))
-        if key not in picked and not record.get("startedAt") and (recordDay(record) or "").startswith(dayText):
+        if (key not in picked and not record.get("startedAt") and record.get("temsCheck") != "missing"
+                and (recordDay(record) or "").startswith(dayText)):  # not in TEMS yet: nothing to drive
             picked[key] = (record, "pending" if ahead else "missed")
     if isToday:  # plus everything on Start's To start list (imported or moved to today)
         for record in notStartedRecords():
@@ -414,7 +421,7 @@ def settings():
                      "skipped": config.defaultSkipped, "status": config.defaultStatus},
         "statusOptions": workflows.statusOptions, "equipments": config.equipments,
         "folderNamePrefix": config.folderNamePrefix, "whatsappGroup": config.whatsappGroup,
-        "whatsappWoGroup": config.whatsappWoGroup,
+        "whatsappWoGroup": config.whatsappWoGroup, "teamsUrl": config.teamsUrl,
         "whatsappSend": config.whatsappSend, "whatsappRetries": config.whatsappRetries,
         "whatsappAutoShare": config.whatsappAutoShare,
         "temsTestMode": config.temsTestMode, "temsProject": config.temsProject, "temsAssignWo": config.temsAssignWo,
@@ -553,6 +560,42 @@ def recordsRename():
     return jsonify({"wo": newWo, "renamed": record is not None, "record": detail(record) if record else None})
 
 
+@app.get("/api/records/<path:wo>/picture")
+def recordPicture(wo):
+    """The WO's TEMS picture (the file itself, for the page to show)."""
+    path = pictureOf(getRecord(wo))
+    if not path:
+        return fail("No picture saved for this WO.", 404)
+    response = send_file(path, max_age=0)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.post("/api/records/<path:wo>/picture")
+def recordPictureSave(wo):
+    """A picture for the WO, picked or dragged in on End Ticket (form field "picture"). Replaces the old one."""
+    requireRecord(wo)
+    upload = request.files.get("picture")
+    if not upload:
+        return fail("No picture in the upload.")
+    try:
+        path, replaced = savePicture(wo, upload.read(), upload.filename or "", source="added by hand")
+    except PictureError as error:
+        return fail(str(error))
+    return jsonify({"message": f"Picture {'replaced' if replaced else 'saved'}: {path}", "record": detail(getRecord(wo))})
+
+
+@app.post("/api/records/<path:wo>/picture/show")
+def recordPictureShow(wo):
+    """Shows the WO's picture in Explorer (selected in the pictures folder)."""
+    import subprocess
+    path = pictureOf(getRecord(wo))
+    if not path:
+        return fail("No picture saved for this WO.")
+    subprocess.Popen(["explorer", "/select,", str(path)])
+    return jsonify({"opened": str(path)})
+
+
 @app.post("/api/records/<path:wo>/openFile")
 def recordOpenFile(wo):
     record = getRecord(wo) or {}
@@ -649,11 +692,98 @@ def importSheet():
     return jsonify(result)
 
 
+def notInTemsRecords():
+    """Every not-started WO the plan check didn't find in TEMS (any import, saved in tickets.json):
+    off Start's list until a recheck finds them."""
+    rows = [r for r in searchRecords() if r.get("temsCheck") == "missing" and not r.get("startedAt")]
+    return sorted(rows, key=lambda r: (r.get("importedAt") or "", r.get("importOrder") or 0))
+
+
+@app.get("/api/import/notInTems")
+def importNotInTems():
+    return jsonify([{"wo": r["wo"], "cluster": r.get("cluster") or "", "gridKey": r.get("gridKey") or "",
+                     "planDate": planDateOf(r.get("wo")), "importSource": r.get("importSource") or "",
+                     "temsCheckAt": r.get("temsCheckAt") or ""} for r in notInTemsRecords()])
+
+
+def lastImportRecords():
+    """The WOs of the latest import (the records it saved or refreshed), in the plan's order."""
+    records = [r for r in searchRecords() if r.get("importedAt")]
+    if not records:
+        return []
+    latest = max(r["importedAt"] for r in records)
+    return sorted((r for r in records if r["importedAt"] == latest), key=lambda r: r.get("importOrder") or 0)
+
+
+def planDateOf(wo):
+    """The plan date in a WO name (..._110426_... = Nov 4, 2026) as YYYY-MM-DD, or ""."""
+    import re
+    match = re.search(r"_(\d{2})(\d{2})(\d{2})_", wo or "")
+    if not match:
+        return ""
+    month, day, year = match.groups()
+    return f"20{year}-{month}-{day}" if 1 <= int(month) <= 12 and 1 <= int(day) <= 31 else ""
+
+
+@app.get("/api/import/last")
+def importLast():
+    """The latest import as a table: each WO, its plan spelling, and whether TEMS has it."""
+    records = lastImportRecords()
+    rows = [{**summary(r), "excelWo": r.get("excelWo") or "", "planDate": planDateOf(r.get("wo")),
+             "importOrder": r.get("importOrder"), "temsCheck": r.get("temsCheck") or "",
+             "temsWhere": r.get("temsWhere") or "", "temsName": r.get("temsName") or "",
+             "temsCheckAt": r.get("temsCheckAt") or ""} for r in records]
+    first = records[0] if records else {}
+    return jsonify({"source": first.get("importSource") or "", "importedAt": first.get("importedAt") or "",
+                    "rows": rows})
+
+
+@app.post("/api/import/check")
+def importCheck():
+    """Plan check: are the WOs (default: the latest import) in TEMS Cloud / on Assign? A job."""
+    wos = body().get("wos") or [r["wo"] for r in lastImportRecords()]
+    if not wos:
+        return fail("Import a plan first.")
+    job = startJob("planCheck", "", f"TEMS check · {len(wos)} WOs",
+                   lambda job: workflows.checkPlanInTems(wos, progress=job.progress))
+    return jsonify({"job": job.toJson()})
+
+
+@app.get("/api/import/missing.xlsx")
+def importMissingExcel():
+    """Every WO still waiting on TEMS, one per row (for the coordinators)."""
+    import io
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+    missing = [r["wo"] for r in notInTemsRecords()]
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "Not in TEMS"
+    sheet.append(["WO"])
+    sheet["A1"].font = Font(bold=True)
+    for wo in missing:
+        sheet.append([wo])
+    sheet.column_dimensions["A"].width = max([len(wo) for wo in missing] + [12]) + 4
+    data = io.BytesIO()
+    book.save(data)
+    data.seek(0)
+    return send_file(data, as_attachment=True, download_name=f"WOs not in TEMS {datetime.now():%m-%d-%Y}.xlsx",
+                     mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
 # ---------- end ----------
 def readyToEnd(record):
     """TEMS has written the WO's result (GridSummary.csv) - it's driven and can be ended."""
     from kaam.gridSummary import resultReady
     return resultReady(record["wo"])
+
+
+def resultAt(record):
+    """ISO time TEMS wrote the WO's GridSummary, or None."""
+    from datetime import datetime
+    from kaam.gridSummary import resultTime
+    made = resultTime(record["wo"])
+    return datetime.fromtimestamp(made).isoformat() if made else None
 
 
 @app.get("/api/end/open")
@@ -789,7 +919,11 @@ def tems():
     cloudWo = workflows.cleanWorkOrder(data.get("cloudWo", ""))
     assignWo = workflows.cleanWorkOrder(data.get("assignWo", ""))
     if action == "play":
-        return temsPlay()
+        return temsPlay(wo)
+    if action in ("suspend", "discard", "submit"):
+        return temsEnd(action, wo)
+    if action == "openWo":
+        return fail("openWo is part of Start Stationary.")
     if action != "test" and not wo:
         return fail("Enter a WO first.")
     if action == "test" and not (cloudWo or assignWo):
@@ -812,21 +946,80 @@ def tems():
     return jsonify({"job": job.toJson()})
 
 
-def temsPlay():
-    """Live Testing's Start ticket: TEMS's Control page, then play - only when TEMS says the open WO
-    is Validated / Paused (read from TEMS first; never pressed while it runs - that would pause it).
-    Stays on TEMS."""
+def sameWo(a, b):
+    """Same WO, ignoring case, spaces / dashes and the G23d / G23e letter."""
+    import re
+
+    def norm(text):
+        return re.sub(r"(g\d+)[de]", r"\1", re.sub(r"[^a-z0-9]", "", (text or "").lower()))
+    return norm(a) == norm(b)
+
+
+def reopenPhones(progress):
+    """Start Stationary: close the TMO 1 / TMO 2 Vysor windows and open them again (fresh mirror)."""
+    from kaam import phoneControl
+    from kaam.deskLayout import closePhones, layoutDesk
+    phoneControl.listenHere(progress)
+    try:
+        closePhones()
+        time.sleep(1.5)
+        layoutDesk()
+    except Exception as error:
+        progress(f"Phones: couldn't reopen them ({error}) - press Set up desk")
+    finally:
+        phoneControl.listenHere(None)
+
+
+def temsPlay(wo=""):
+    """Live Testing's Start Stationary: the phones' Vysor windows closed and opened again (at the
+    same time as the rest), then in TEMS: if the WO isn't open, Assign -> the WO -> Open and wait
+    until TEMS has it ready (Validated, green); then the Control page and play - only when TEMS
+    says Validated / Paused (never while it runs - that would pause it). Stays on TEMS."""
     from kaam import temsMap
 
-    def work(job):
+    def readState():
         try:
-            before = temsMap.workOrderState()
+            return temsMap.workOrderState()
         except Exception as error:
             raise RuntimeError(f"TEMS isn't answering at {config.temsUrl} - is TEMS Paragon running? ({error})")
+
+    def work(job):
+        phones = threading.Thread(target=reopenPhones, args=(job.progress,), daemon=True)
+        phones.start()
+        try:
+            return startOnTems(job)
+        finally:
+            phones.join(60)
+
+    def startOnTems(job):
+        before = readState()
         name = before["wo"] or "the open WO"
         job.progress(f"TEMS: {name} is {before['stateName']}" + (f" ({before['error']})" if before["error"] else ""))
         if before["state"] == temsMap.executing:
             return {"ok": True, "summary": f"TEMS: {name} is already running - nothing pressed."}
+        isOpen = before["state"] in (1, 2, 5, 6, 9, 10)  # Opening / Opened / Validating / Validated / Pausing / Paused
+        if isOpen and wo and before["wo"] and not sameWo(before["wo"], wo):
+            raise RuntimeError(f"TEMS has {before['wo']} open, not {wo} - nothing pressed. Close it in TEMS "
+                               "or pick that WO here.")
+        if not isOpen:
+            if not wo:
+                raise RuntimeError(f"TEMS has no WO open ({before['stateName']}) - pick the WO here so it can be opened from Assign.")
+            job.progress(f"TEMS: opening {wo} from Assign…")
+            opened = runTems("openWo", wo=wo, timeout=3 * 60)
+            if not opened.get("ok"):
+                return opened
+            job.progress(opened.get("summary") or "Opened")
+        if before["state"] not in temsMap.playable:
+            job.progress("Waiting for TEMS to have it ready (green)…")
+            for _ in range(80):  # up to ~2 min: Opening -> Opened -> Validating -> Validated
+                time.sleep(1.5)
+                before = readState()
+                if before["state"] in temsMap.playable or before["state"] == temsMap.executing:
+                    break
+            job.progress(f"TEMS: {before['wo'] or name} is {before['stateName']}")
+            name = before["wo"] or name
+            if before["state"] == temsMap.executing:
+                return {"ok": True, "summary": f"TEMS: {name} is already running - nothing pressed."}
         canPlay = before["state"] in temsMap.playable
         job.progress("Opening TEMS Control" + (", pressing play…" if canPlay else " (play isn't ready yet)…"))
         result = runTems("play", canPlay=canPlay)
@@ -844,17 +1037,61 @@ def temsPlay():
             return {"ok": False, "error": f"Pressed play, but {name} is {after['stateName']}"
                                           + (f" ({after['error']})" if after["error"] else "") + ". Check TEMS."}
         return result
-    job = startJob("tems", "", "TEMS: start ticket", work)
+    job = startJob("tems", wo, "TEMS: start stationary", work)
     return jsonify({"job": job.toJson()})
+
+
+def saveTemsPicture(wo, dataUrl):
+    """Submit's picture of TEMS into the pictures folder (one per WO, replaces an older one); the
+    WO's record remembers where. Returns the path."""
+    import base64
+    path, _ = savePicture(wo or "TEMS", base64.b64decode(dataUrl.split(",", 1)[1]), "picture.png", source="TEMS Submit")
+    return path
+
+
+def temsEnd(action, wo=""):
+    """TEMS's finished-test page (stationary + mobility done): Suspend / Discard / Submit.
+    Submit for now = Suspend, then a picture of the WO's details on Assign (saved in the pictures folder
+    and on the WO - WhatsApp sends it with the CSV),
+    open it again and Cancel the stationary test - then it waits for you."""
+    from kaam.chromeBridge import setTemsStage
+
+    def work(job):
+        job.progress({"suspend": "TEMS: Suspend…", "discard": "TEMS: Discard (and Yes)…",
+                      "submit": "TEMS: Chrome full window, Suspend, then a picture of the WO on Assign…"}[action])
+        result = runTems(action, wo=wo, timeout=6 * 60)
+        picture = result.pop("screenshot", None)
+        if result.get("ok"):
+            setTemsStage("closed")
+        if picture:
+            path = saveTemsPicture(wo, picture)
+            result["summary"] = f"{result.get('summary') or 'Done'} Picture: {path}"
+            result["picture"] = str(path)
+        if wo and getRecord(wo) and result.get("ok"):
+            workflows.safeSave(wo, event=result.get("summary"))
+        return result
+    title = {"suspend": "TEMS: suspend", "discard": "TEMS: discard", "submit": "TEMS: submit (suspend + picture)"}[action]
+    job = startJob("tems", wo, f"{title}{f' {wo}' if wo else ''}", work)
+    return jsonify({"job": job.toJson()})
+
+
+@app.get("/api/tems/stage")
+def temsStageNow():
+    """Where the TEMS test is (from the TEMS tab's watcher) and how old that is."""
+    from kaam.chromeBridge import temsStage
+    age = time.time() - temsStage["at"] if temsStage["at"] else None
+    return jsonify({"stage": temsStage["stage"], "wo": temsStage["wo"], "age": age})
 
 
 # ---------- Live Testing (phones over adb, Vysor windows) ----------
 liveActions = {
     "desk": "Set up desk",
+    "closePhones": "Close TMO windows",
     "fullTestAll": "Test all, one by one",
     "fullTest": "Full test",
     "speedtest": "Speed test",
     "airplane": "Airplane toggle",
+    "hotspot": "Hotspot on the best phone",
 }
 
 
@@ -972,7 +1209,7 @@ def liveRun():
     wo = workflows.cleanWorkOrder(data.get("wo", ""))
     if action not in liveActions:
         return fail(f"Unknown action {action}.")
-    if action not in ("desk", "fullTestAll") and not phone:
+    if action not in ("desk", "closePhones", "fullTestAll", "hotspot") and not phone:
         return fail("Pick a phone.")
     missingWo = wo if wo and not getRecord(wo) else ""
     if missingWo:
@@ -996,15 +1233,29 @@ def liveRun():
                 from kaam.deskLayout import setupDesk
                 setupDesk()
                 return "Desk ready: phones set up, Chrome on the left, phones on the right."
+            if action == "closePhones":
+                from kaam.deskLayout import closePhones
+                closed = closePhones()
+                return (f"Closed {' and '.join(closed)} in Vysor - Set up desk opens them again."
+                        if closed else "No TMO window was open in Vysor.")
             if action == "fullTestAll":
                 connected = set(phoneControl.connectedSerials())
                 serials = [s for s in phoneControl.configuredPhones().values() if s in connected]
                 if not serials:
-                    raise RuntimeError("No phone from PHONES in .env is connected.")
+                    raise RuntimeError("Neither TMO 1 nor TMO 2 (Settings > Phones) is connected.")
                 # one at a time (NR phones first, then LTE): two speed tests must not share the network
                 results = phoneControl.fullTestOneByOne(serials, onResult=lambda r: keep(job, r),
                                                         onOrder=lambda names: job.post("order", names))
                 return {"summary": " · ".join(resultText(r) for r in results), "results": results}
+            if action == "hotspot":  # on the phone with the best network now, off on the others
+                from kaam import liveSignal
+                connected = set(phoneControl.connectedSerials())
+                serials = [s for s in phoneControl.configuredPhones().values() if s in connected]
+                if not serials:
+                    raise RuntimeError("Neither TMO 1 nor TMO 2 (Settings > Phones) is connected.")
+                now = time.time()
+                fresh = {s: r for s, r in liveSignal.signals(serials).items() if r and now - r.get("at", 0) < 10}
+                return phoneControl.hotspotOnBest(serials, fresh)
             serial = phoneControl.pickPhones([phone])[0]
             if action == "airplane":  # just re-attach to the network; no test, nothing saved
                 if phoneControl.toggleAirplane(serial):

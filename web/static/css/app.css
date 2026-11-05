@@ -240,6 +240,8 @@ kbd { font: 600 10.5px var(--sans); padding: 2px 6px; border-radius: 5px; backgr
 
 /* ---------- WO box ---------- */
 .woBox .match { margin-top: 6px; min-height: 18px; }
+.woBox .woPreview { margin-top: 2px; }
+.rec .gridShort { color: var(--text); }
 .pickerBtn { position: relative; }
 /* compact WO box: the list button sits inside the field, right of the clear button */
 .woBox.compact .insideTools { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); display: flex; align-items: center; gap: 2px; }
@@ -716,7 +718,9 @@ table.sheet td.num { color: var(--faint); width: 1%; }
 
 /* ---------- Live Testing (made to work in half a screen) ---------- */
 .liveTop .pair, .btnGrid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; }
-.liveTop .pair { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+/* Live top bar: the 4 actions share one row and re-flow by width (4 / 2+2 / stacked), never 3 + 1 */
+.liveTop .pair { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
+.liveTop .pair .btn { height: 46px; font-size: 14px; white-space: nowrap; padding: 0 10px; gap: 6px; }
 .btnGrid { gap: 8px; }
 .liveTop .pair .btn, .btnGrid .btn { width: 100%; min-width: 0; }
 .btnGrid .btn span, .liveTop .pair .btn span { overflow: hidden; text-overflow: ellipsis; }
@@ -727,8 +731,9 @@ table.sheet td.num { color: var(--faint); width: 1%; }
 .liveTopRow { display: grid; gap: 10px; }
 .liveMain { display: grid; gap: 14px; }
 @container live (min-width: 1180px) {
-  .liveTopRow { grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); align-items: start; }
-  .liveTopRow .pair { margin-top: 22px; }  /* level with the WO box (under its label) */
+  /* wide: WO box on the left, the 4 actions in one row beside it, level with the input */
+  .liveTopRow { grid-template-columns: minmax(0, 1fr) auto; align-items: end; }
+  .liveTopRow .pair { grid-template-columns: repeat(5, minmax(118px, auto)); }
 }
 @container live (min-width: 980px) {
   /* wide: map on the left, phones stacked on the right */
@@ -737,7 +742,7 @@ table.sheet td.num { color: var(--faint); width: 1%; }
   .liveMain .tmMap { height: clamp(420px, calc(100vh - 290px), 900px); }
 }
 @container live (max-width: 640px) { .liveGrid, .techSummary { grid-template-columns: minmax(0, 1fr); } }
-@container live (max-width: 520px) { .liveTop .pair { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } .liveTop .pair .btn:last-child { grid-column: 1 / -1; } }
+@container live (max-width: 700px) { .liveTop .pair { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } .liveTop .pair .btn:last-child:nth-child(odd) { grid-column: 1 / -1; } }
 .phoneCard .cardBody { display: flex; flex-direction: column; gap: 12px; }
 .phoneHead { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .phoneHead h2 { margin: 0; display: flex; align-items: center; gap: 6px; }
@@ -806,3 +811,41 @@ table.sheet td.num { color: var(--faint); width: 1%; }
 .sig.weak .v { color: var(--amber); }
 .sig.bad .v { color: var(--red); }
 .sigMeta { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); margin-top: 4px; }
+
+/* Live Testing: TEMS finished the test (stationary + mobility) - Submit / Discard / Suspend */
+.temsEnd { display: flex; align-items: center; gap: 10px 14px; flex-wrap: wrap; padding: 10px 12px; border-radius: var(--radiusSm);
+  background: var(--greenSoft); border: 1px solid var(--green); }
+.temsEnd[hidden] { display: none; }
+.temsEndText { display: flex; align-items: center; gap: 8px; flex: 1 1 260px; color: var(--text); }
+.temsEndText svg { color: var(--green); flex: none; }
+.temsEndBtns { display: grid; grid-template-columns: repeat(3, minmax(96px, 1fr)); gap: 8px; flex: 1 1 320px; }
+.temsEndBtns .btn { width: 100%; min-width: 0; }
+
+/* End Ticket: the TEMS picture (required for WhatsApp) - click, drop or paste */
+.picDrop { position: relative; display: grid; place-items: center; min-height: 150px; border: 1.5px dashed var(--borderStrong);
+  border-radius: var(--radiusSm); background: var(--panel2); cursor: pointer; overflow: hidden; }
+.picDrop:hover, .picCard.dragging .picDrop { border-color: var(--accent); background: var(--accentSoft); }
+.picDrop.off { cursor: default; opacity: .6; }
+.picImg { display: block; width: 100%; max-height: 340px; object-fit: contain; background: #000; }
+.picImg[hidden], .picEmpty[hidden] { display: none; }
+.picEmpty { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 22px 14px; color: var(--muted); text-align: center; font-size: 13px; }
+.picEmpty b { color: var(--text); font-size: 14px; }
+.picEmpty svg { width: 26px; height: 26px; color: var(--faint); }
+.picPath { font-size: 11.5px; color: var(--muted); word-break: break-all; }
+.picPath:empty { display: none; }
+
+/* Header: Teams button, left of the search (Settings → Web pages → Teams link) */
+.teamsBtn { width: 38px; height: 38px; color: #7b83eb; border: 1px solid var(--border); text-decoration: none; }
+.teamsBtn:hover { color: #9aa1f5; border-color: #7b83eb; background: rgba(123, 131, 235, .12); }
+
+/* Today: plan import checked against TEMS Cloud */
+.planTable { max-height: 560px; overflow: auto; }
+.planTable td .note { font-size: 11.5px; }
+.planTable a.wo { color: var(--text); text-decoration: none; font-weight: 600; }
+.planTable a.wo:hover { color: #b9ccff; }
+table.sheet tr.missingRow td { background: color-mix(in srgb, var(--red) 9%, transparent); }
+.missingList { margin-top: 8px; max-height: 220px; overflow: auto; }
+
+/* Settings: a command to run (e.g. adb devices for a phone's ID) */
+.setCmd { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
+.setCmd code { font: 12.5px var(--mono); background: #0d1015; border: 1px solid var(--border); border-radius: 6px; padding: 3px 8px; color: #d9dde6; }

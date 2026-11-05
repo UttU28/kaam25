@@ -18,12 +18,15 @@ from .gridSummary import buildFolderName, copyGridSummary, findRenamedCopy
 from .sheetImport import readSheet
 from .ticketLookup import closeTicketSteps, currentDriveShift, lookupTicketId, openCreateTicketForm
 from .ticketStore import (findRecord, getRecord, importWorkOrders, isLocalStart, localIdPattern, now,
-                          saveRecord, searchRecords, startLocal, startNewTicket)
+                          renameWo, saveRecord, searchRecords, startLocal, startNewTicket)
 from .whatsappShare import shareOnWhatsApp
 
 statusOptions = ["PASSED", "SKIPPED", "FAILED"]
 
 # (record field set when done, name, what it does)
+# Statuses a cloud ticket can be closed with (any finished result).
+closableStatuses = ("PASSED", "SKIPPED", "FAILED")
+
 closeSteps = [
     ("closeStep1At", "Step 1", "Start Driving task → Completed (Save, then OK)"),
     ("closeStep2At", "Step 2", "Check Out: Route Completion Status → Completed, task → Completed"),
@@ -105,10 +108,21 @@ def formatReport(fields):
     return report
 
 
+def gridsForStatus(status, attempted="", skipped=""):
+    """The status decides the grid counts: SKIPPED = attempted 0, skipped 1; PASSED / FAILED =
+    attempted 1, skipped 0. No status yet: the counts stay as given. Returns (attempted, skipped)."""
+    status = (status or "").upper()
+    if status == "SKIPPED":
+        return "0", "1"
+    if status in ("PASSED", "FAILED"):
+        return "1", "0"
+    return str(attempted or ""), str(skipped or "")
+
+
 def reportFieldsFromRecord(record):
     record = record or {}
     value = lambda key, default: str(record[key]) if record.get(key) not in (None, "") else default
-    return {
+    fields = {
         "wo": record.get("wo", ""), "ticket": record.get("ticketId") or "",
         "eq3": record.get("eq3") or "", "eq6": record.get("eq6") or "",
         "total": value("totalGrids", defaultTotalGrids), "attempted": value("attempted", defaultAttempted),
@@ -116,6 +130,9 @@ def reportFieldsFromRecord(record):
         "status": record.get("status") if record.get("status") in statusOptions else defaultStatus,
         "remarks": record.get("remarks") or "",
     }
+    if record.get("status") in statusOptions:
+        fields["attempted"], fields["skipped"] = gridsForStatus(fields["status"], fields["attempted"], fields["skipped"])
+    return fields
 
 
 def reportFromRecord(record):
@@ -230,12 +247,72 @@ def chooseNewTicket(wo, ticketId):
 # ---------- import ----------
 def importSheetFile(path, sourceName=None):
     """Read an Excel / CSV plan (columns found by their values; only your team's rows) and save
-    it. Returns {count, added, updated, alreadyStarted, notes, source}."""
+    it. Returns {count, added, updated, alreadyStarted, notes, source, wos}."""
     sourceName = sourceName or Path(path).name
     rows, notes = readSheet(path, team=employeeId, knownWos=[r.get("wo", "") for r in searchRecords()])
-    added, updated, alreadyStarted = importWorkOrders(rows, sourceName)
+    added, updated, alreadyStarted, wos = importWorkOrders(rows, sourceName)
     return {"count": len(rows), "added": added, "updated": updated, "alreadyStarted": alreadyStarted,
-            "notes": notes, "source": sourceName}
+            "notes": notes, "source": sourceName, "wos": wos}
+
+
+# ---------- Plan check: are the imported WOs in TEMS Cloud? ----------
+planLetterPattern = re.compile(r"(_[a-z]\d+)[de](?=_)")
+
+
+def planKey(wo):
+    """A WO for matching a plan against TEMS: spaces and case ignored, and the d / e script letter
+    (G23d / G23e) left out - everything else (number, date, ...) must be the same."""
+    squashed = re.sub(r"\s+", "", wo or "").lower()
+    return planLetterPattern.sub(lambda m: m.group(1) + "*", squashed, count=1)
+
+
+def checkPlanInTems(wos, progress=lambda text: None):
+    """Reads every WO in the TEMS Cloud project (scrolled to the end) and on Assign, then marks each
+    of `wos` on its record: found (temsCheck "found", temsWhere cloud / assign) or "missing". A WO TEMS
+    spells with the other letter (G23d vs G23e) is found, and renamed to TEMS's spelling in Records.
+    Returns {checked, found, renamed, missing, cloudCount, assignCount, summary}."""
+    from .temsParagon import runTems
+    wos = [wo for wo in dict.fromkeys(cleanWorkOrder(wo) for wo in wos) if wo]
+    if not wos:
+        raise WorkflowError("No WOs to check.")
+    progress(f"TEMS: reading every WO in the Cloud project and on Assign ({len(wos)} to check)…")
+    result = runTems("listWos", timeout=6 * 60)
+    if not result.get("ok"):
+        raise WorkflowError(result.get("error") or "TEMS didn't list its WOs.")
+    exact, loose = {}, {}
+    for where in ("cloud", "assign"):  # Cloud wins when a WO is in both
+        for name in result.get(f"{where}Names") or []:
+            exact.setdefault(re.sub(r"\s+", "", name).lower(), (name, where))
+            loose.setdefault(planKey(name), (name, where))
+    progress(f"TEMS has {len(result.get('cloudNames') or [])} WOs in Cloud and "
+             f"{len(result.get('assignNames') or [])} on Assign - matching…")
+    found, renamed, missing, problems = [], [], [], []
+    stamp = now()
+    for wo in wos:
+        hit = exact.get(re.sub(r"\s+", "", wo).lower()) or loose.get(planKey(wo))
+        if not hit:
+            missing.append(wo)
+            safeSave(wo, temsCheck="missing", temsCheckAt=stamp, temsName="", temsWhere="")
+            continue
+        name, where = hit
+        current = wo
+        if re.sub(r"\s+", "", name).lower() != re.sub(r"\s+", "", wo).lower():
+            try:
+                record = renameWo(wo, name)
+                current = (record or {}).get("wo") or name
+                renamed.append(f"{wo} -> {current}")
+                safeSave(current, event=f"Plan check: TEMS spells it {name} - renamed")
+            except Exception as error:
+                problems.append(f"{wo}: TEMS has it as {name}, but it couldn't be renamed ({error})")
+        found.append(current)
+        safeSave(current, temsCheck="found", temsCheckAt=stamp, temsName=name, temsWhere=where)
+    parts = [f"{len(found)} of {len(wos)} WOs are in TEMS"]
+    if renamed:
+        parts.append(f"{len(renamed)} renamed to TEMS's spelling")
+    parts.append(f"{len(missing)} missing" if missing else "none missing")
+    return {"checked": len(wos), "found": found, "renamed": renamed, "missing": missing, "problems": problems,
+            "cloudCount": len(result.get("cloudNames") or []), "assignCount": len(result.get("assignNames") or []),
+            "summary": " · ".join(parts) + "."}
 
 
 # ---------- End ----------
@@ -374,6 +451,24 @@ def endAll(wos, post=lambda kind, value: None, send=None):
         doneLine = sendWoDone(shared, send=send, progress=progress)
         if doneLine:
             progress(doneLine)
+
+    # Like End Ticket's Done: each WO that's fully through (ended, and shared now or before) gets its
+    # ActixOne tabs closed. A WO with a problem keeps its tabs, so you can look at what happened.
+    closedTabs = 0
+    for wo in ended:
+        record = getRecord(wo) or {}
+        if not (wo in shared or record.get("whatsappSentAt")):
+            continue
+        tokens = record.get("eqTabTokens") or []
+        if tokens:
+            try:
+                requestTabsClosed(tokens)
+                closedTabs += len(tokens)
+            except Exception:
+                pass  # the tabs just stay open; never fail the run for this
+        safeSave(wo, event="End Tickets: done", eqTabTokens=[])
+    if closedTabs:
+        progress(f"Closed {closedTabs} ActixOne tab{'s' if closedTabs != 1 else ''}")
     lines = [f"Ended {len(ended)} of {len(wos)}" + (f", shared {len(shared)} on WhatsApp." if toShare else ".")]
     if doneLine:
         lines.append(doneLine)
@@ -388,6 +483,7 @@ def saveReportFields(fields, event=None, **extra):
     if not wo:
         raise WorkflowError("Enter the WO first.")
     fields = {**fields, "wo": wo}
+    fields["attempted"], fields["skipped"] = gridsForStatus(fields.get("status"), fields.get("attempted"), fields.get("skipped"))
     error = safeSave(wo, event=event, **extra, report=formatReport(fields), ticketId=fields.get("ticket") or None,
                      eq3=fields.get("eq3") or None, eq6=fields.get("eq6") or None,
                      totalGrids=str(fields.get("total") or ""), attempted=str(fields.get("attempted") or ""),
@@ -436,6 +532,7 @@ def updateStatus(wo, total, attempted, skipped, status, remarks, source="Records
         raise WorkflowError("Not in Records yet - start the WO first.")
     if status not in statusOptions:
         raise WorkflowError("Pick a status first.")
+    attempted, skipped = gridsForStatus(status, attempted, skipped)
     fields = {"totalGrids": str(total).strip(), "attempted": str(attempted), "skipped": str(skipped),
               "status": status, "remarks": (remarks or "").strip()}
     saved = {key: str(record.get(key) if record.get(key) is not None else "").strip() for key in fields}
@@ -489,17 +586,24 @@ def sendWoDone(wos, send=None, progress=lambda text: None, onlyNew=True):
 
 
 def shareTicket(wo, report, send=None, csvPath=None, progress=lambda text: None, checkFirst=False, woDone=True):
-    """Share the renamed CSV + the report (Ticket ID blank for a local start) on WhatsApp, then (woDone)
-    "<WO> - Done" in the WO group."""
+    """Share the renamed CSV + the TEMS picture + the report (Ticket ID blank for a local start) on
+    WhatsApp (the picture as a photo after the CSV), then (woDone) "<WO> - Done" in the WO group. The picture is required."""
     wo = cleanWorkOrder(wo)
     if not wo:
         raise WorkflowError("Enter a WO first.")
     from .config import whatsappGroup, whatsappSend
     send = whatsappSend if send is None else send
-    csvPath = csvPath or (getRecord(wo) or {}).get("gridSummaryPath")
+    from .pictures import pictureOf
+    record = getRecord(wo) or {}
+    csvPath = csvPath or record.get("gridSummaryPath")
+    picture = pictureOf(record)
+    if not picture:
+        raise WorkflowError(f"{wo}: no TEMS picture yet - add it on End Ticket (or Submit on Live Testing) "
+                            "before sharing. It goes out with the CSV and the report.")
     progress("Sharing on WhatsApp… (waiting for WhatsApp to load fully)")
     try:
-        summary, wasSent = shareOnWhatsApp(wo, whatsappCaption(wo, report), csvPath, send=send, checkFirst=checkFirst)
+        summary, wasSent = shareOnWhatsApp(wo, whatsappCaption(wo, report), csvPath, send=send, checkFirst=checkFirst,
+                                           picturePath=picture)
     except Exception as error:
         safeSave(wo, event=f"WhatsApp: failed - {error}")
         raise
@@ -535,7 +639,7 @@ def closeState(record):
     record = record or {}
     status = (record.get("status") or "").upper()
     isLocal = isLocalStart(record)
-    canClose = bool(record) and status == "PASSED" and not isLocal
+    canClose = bool(record) and status in closableStatuses and not isLocal
     if record.get("closedAt"):
         canClose = False  # done (by the close steps, or marked closed by hand)
     if not record:
@@ -545,8 +649,8 @@ def closeState(record):
     elif isLocal:
         reason = (f"This is a local start ({record.get('ticketId')}) - there's no TechInsights ticket to close. "
                   "Only the day's cloud ticket gets closed.")
-    elif status != "PASSED":
-        reason = f"Close TKT is only for PASSED tickets (this one is {status or 'not set'})."
+    elif status not in closableStatuses:
+        reason = f"Set the status (PASSED, SKIPPED or FAILED) on End Ticket first - it's {status or 'not set'}."
     else:
         reason = "Ready. Close TKT runs the steps in TechInsights."
     steps = [{"field": field, "name": name, "what": what, "doneAt": record.get(field)}
@@ -555,8 +659,9 @@ def closeState(record):
 
 
 def isReadyToClose(record):
-    """PASSED cloud tickets not closed yet. Local starts never show (they have no ticket)."""
-    return ((record.get("status") or "").upper() == "PASSED" and not isLocalStart(record)
+    """Cloud tickets with a result (PASSED / SKIPPED / FAILED), not closed yet. Local starts never
+    show (they have no ticket)."""
+    return ((record.get("status") or "").upper() in closableStatuses and not isLocalStart(record)
             and not record.get("closedAt") and not all(record.get(field) for field, _, _ in closeSteps))
 
 
@@ -576,7 +681,8 @@ def closeTicket(wo, progress=lambda text: None):
     except Exception:
         csvPath = None  # Step 3 stops and says so, if the ticket gets that far
     logfile = {"eq3": record.get("eq3"), "eq6": record.get("eq6"), "total": record.get("totalGrids"),
-               "tested": record.get("attempted"), "skipped": record.get("skipped"), "csvPath": csvPath}
+               "csvPath": csvPath}
+    logfile["tested"], logfile["skipped"] = gridsForStatus(record.get("status"), record.get("attempted"), record.get("skipped"))
     try:
         summary, stepsDone, alreadyDone, error = closeTicketSteps(wo, ticketId, logfile)
     except Exception as error:

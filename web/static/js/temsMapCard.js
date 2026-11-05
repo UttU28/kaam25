@@ -6,7 +6,7 @@ import { api, icon } from "./core.js";
 import { loadLeaflet } from "./pages/maps.js";
 
 // TEMS's Default layer settings (Map > Layers), ARGB from its config.
-const GRID = {
+const gridStyle = {
   colors: ["#0078d7", "#10893e", "#000000"],   // not tested / tested / skipped
   cellOpacity: 0.15, stationaryOpacity: 0.75,
   stroke: "rgba(0,0,0,0.5)", strokeWidth: 1,
@@ -14,13 +14,13 @@ const GRID = {
   neighbors: "#e53935", neighborsWidth: 3,
   index: "#ababab",
 };
-const ROUTE = { color: "#1c2bff", width: 4, target: "#1ca8ff", states: ["#bc0000", "#27c416", "#b6b6b6"] };
-const TRACK = { color: "#1ca8ff", width: 2, previous: "#004f80", previousWidth: 2 };
-const CAR_SCALE = 0.5;   // TEMS draws its 96 px car image at half size
-const OSRM = "https://router.project-osrm.org";
-const PAN_KEY = "kaamTemsAutoPan";
+const routeStyle = { color: "#1c2bff", width: 4, target: "#1ca8ff", states: ["#bc0000", "#27c416", "#b6b6b6"] };
+const trackStyle = { color: "#1ca8ff", width: 2, previous: "#004f80", previousWidth: 2 };
+const carScale = 0.5;   // TEMS draws its 96 px car image at half size
+const osrmUrl = "https://router.project-osrm.org";
+const panKey = "kaamTemsAutoPan";
 // TEMS's flag shape (start: green, goal: checkered).
-const FLAG = "M26.5,4.8c-0.3-0.2-0.7-0.2-1,0c-3.5,2.2-6.1,0.8-9-0.8c-3-1.6-6.5-3.4-11-0.7C5.2,3.6,5,3.9,5,4.3V18v0.3V29" +
+const flagPath = "M26.5,4.8c-0.3-0.2-0.7-0.2-1,0c-3.5,2.2-6.1,0.8-9-0.8c-3-1.6-6.5-3.4-11-0.7C5.2,3.6,5,3.9,5,4.3V18v0.3V29" +
   "c0,0.6,0.4,1,1,1s1-0.4,1-1V18.9c3.3-1.8,5.7-0.5,8.5,1c1.9,1,4,2.1,6.4,2.1c1.4,0,3-0.4,4.6-1.4c0.3-0.2,0.5-0.5,0.5-0.9v-14" +
   "C27,5.3,26.8,5,26.5,4.8z";
 
@@ -57,11 +57,11 @@ export function temsMapCard() {
   let map = null, L = null, overlay = null, timer = null, dead = false, fitted = false;
   let data = null, track = [], previousTrack = [], roadRoute = null, routeKey = "";
   let car = null, carPrev = null, heading = 0;
-  let autoPan = lsGet(PAN_KEY) !== "0";
+  let autoPan = lsGet(panKey) !== "0";
   const paintPan = () => panBtn.classList.toggle("on", autoPan);
   paintPan();
   panBtn.addEventListener("click", () => {
-    autoPan = !autoPan; lsSet(PAN_KEY, autoPan ? "1" : "0"); paintPan();
+    autoPan = !autoPan; lsSet(panKey, autoPan ? "1" : "0"); paintPan();
     if (autoPan && car) map?.panTo(car);
   });
   q(".tmFit").addEventListener("click", () => fit());
@@ -88,7 +88,7 @@ export function temsMapCard() {
     if (waypoints.length < 2) return;
     try {
       const coords = waypoints.map(([lat, lon]) => `${lon},${lat}`).join(";");
-      const reply = await fetch(`${OSRM}/route/v1/driving/${coords}?overview=full&geometries=geojson`).then((r) => r.json());
+      const reply = await fetch(`${osrmUrl}/route/v1/driving/${coords}?overview=full&geometries=geojson`).then((r) => r.json());
       if (key !== routeKey || reply.code !== "Ok") return;
       roadRoute = reply.routes[0].geometry.coordinates.map(([lon, lat]) => [lat, lon]);
       overlay?.redraw();
@@ -102,8 +102,8 @@ export function temsMapCard() {
     const px = (p) => map.latLngToContainerPoint(p);
     drawGrid(ctx, px, map.getZoom());
     drawRoute(ctx, px);
-    drawTrack(ctx, px, previousTrack, TRACK.previous, TRACK.previousWidth);
-    drawTrack(ctx, px, track, TRACK.color, TRACK.width);
+    drawTrack(ctx, px, previousTrack, trackStyle.previous, trackStyle.previousWidth);
+    drawTrack(ctx, px, track, trackStyle.color, trackStyle.width);
     drawCar(ctx, px);
   }
 
@@ -124,8 +124,8 @@ export function temsMapCard() {
       const path = new Path2D();
       path.moveTo(tl.x, tl.y); path.lineTo(tr.x, tr.y); path.lineTo(br.x, br.y); path.lineTo(bl.x, bl.y); path.closePath();
       if (c.station) {
-        const sColor = withAlpha(GRID.colors[c.stationaryState] || GRID.colors[0], GRID.cellOpacity);
-        const mColor = withAlpha(GRID.colors[c.mobilityState] || GRID.colors[0], GRID.cellOpacity);
+        const sColor = withAlpha(gridStyle.colors[c.stationaryState] || gridStyle.colors[0], gridStyle.cellOpacity);
+        const mColor = withAlpha(gridStyle.colors[c.mobilityState] || gridStyle.colors[0], gridStyle.cellOpacity);
         if (sColor === mColor) { ctx.fillStyle = sColor; ctx.fill(path); }
         else {
           ctx.beginPath(); ctx.moveTo(bl.x, bl.y); ctx.lineTo(tl.x, tl.y); ctx.lineTo(tr.x, tr.y); ctx.closePath();
@@ -134,8 +134,8 @@ export function temsMapCard() {
           ctx.fillStyle = mColor; ctx.fill();
         }
       }
-      ctx.lineWidth = GRID.strokeWidth; ctx.lineJoin = "miter"; ctx.lineCap = "square";
-      ctx.strokeStyle = GRID.stroke; ctx.stroke(path);
+      ctx.lineWidth = gridStyle.strokeWidth; ctx.lineJoin = "miter"; ctx.lineCap = "square";
+      ctx.strokeStyle = gridStyle.stroke; ctx.stroke(path);
       // Grid key in the middle, local index in the bottom-right corner.
       const fontPx = (br.x - tl.x) / Math.max(15, c.id.length);
       if (fontPx >= 4) {
@@ -145,16 +145,16 @@ export function temsMapCard() {
       }
       if (c.index != null && width > 64) {
         ctx.font = `bold ${Math.round(0.15 * width)}px Arial`; ctx.textAlign = "right"; ctx.textBaseline = "bottom";
-        ctx.fillStyle = GRID.index; ctx.fillText(String(c.index), br.x - 3, br.y);
+        ctx.fillStyle = gridStyle.index; ctx.fillText(String(c.index), br.x - 3, br.y);
       }
       if (c.id === data.targetCell) {
-        ctx.lineWidth = GRID.targetWidth; ctx.strokeStyle = GRID.target; ctx.stroke(path);
+        ctx.lineWidth = gridStyle.targetWidth; ctx.strokeStyle = gridStyle.target; ctx.stroke(path);
       }
       // Stationary point: an X in the stationary state's colour.
       if (c.station) {
         const { x, y } = px(c.station);
         const r = Math.min(width / 4, zoom ** 1.2 / 2);
-        ctx.strokeStyle = withAlpha(GRID.colors[c.stationaryState] || GRID.colors[0], GRID.stationaryOpacity);
+        ctx.strokeStyle = withAlpha(gridStyle.colors[c.stationaryState] || gridStyle.colors[0], gridStyle.stationaryOpacity);
         ctx.lineWidth = r / 2; ctx.lineCap = "butt";
         ctx.beginPath(); ctx.moveTo(x - r, y - r); ctx.lineTo(x + r, y + r); ctx.moveTo(x + r, y - r); ctx.lineTo(x - r, y + r); ctx.stroke();
       }
@@ -164,20 +164,20 @@ export function temsMapCard() {
   function drawRoute(ctx, px) {
     const waypoints = data.route.filter((w) => w.at);
     if (waypoints.length > 1) {
-      ctx.lineJoin = "round"; ctx.lineCap = "butt"; ctx.lineWidth = ROUTE.width;
+      ctx.lineJoin = "round"; ctx.lineCap = "butt"; ctx.lineWidth = routeStyle.width;
       ctx.beginPath();
       if (roadRoute) {  // calculated road route: black, like TEMS
         roadRoute.forEach((p, n) => { const { x, y } = px(p); n ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
         ctx.strokeStyle = "black"; ctx.setLineDash([]);
       } else {          // not calculated (yet): dashed straight lines in the route colour
         waypoints.forEach((w, n) => { const { x, y } = px(w.at); n ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
-        ctx.strokeStyle = ROUTE.color; ctx.setLineDash([15, 10]);
+        ctx.strokeStyle = routeStyle.color; ctx.setLineDash([15, 10]);
       }
       ctx.stroke(); ctx.setLineDash([]);
     }
     waypoints.forEach((w, n) => {
       const { x, y } = px(w.at);
-      const color = n === data.targetWaypoint ? ROUTE.target : ROUTE.states[w.state] || ROUTE.states[0];
+      const color = n === data.targetWaypoint ? routeStyle.target : routeStyle.states[w.state] || routeStyle.states[0];
       ctx.beginPath(); ctx.arc(x, y, 13, 0, Math.PI * 2);
       ctx.strokeStyle = color; ctx.lineWidth = 3; ctx.stroke();
       ctx.beginPath(); ctx.arc(x, y, 6, 0, Math.PI * 2);
@@ -208,7 +208,7 @@ export function temsMapCard() {
     ctx.fillStyle = kind === "start" ? "green" : kind === "goal" ? checkers || "red" : "grey";
     ctx.strokeStyle = "black";
     ctx.transform(0.5, 0, 0, 0.5, x, y); ctx.translate(13, 13);
-    const shape = new Path2D(FLAG);
+    const shape = new Path2D(flagPath);
     ctx.fill(shape); ctx.stroke(shape);
     ctx.restore();
   }
@@ -230,11 +230,11 @@ export function temsMapCard() {
     }
     if (!carImage.complete || !carImage.naturalWidth) {  // image not loaded yet: TEMS's plain dot
       ctx.beginPath(); ctx.arc(now.x, now.y, 10, 0, Math.PI * 2);
-      ctx.fillStyle = ROUTE.target; ctx.fill(); ctx.strokeStyle = "black"; ctx.lineWidth = 0.5; ctx.stroke();
+      ctx.fillStyle = routeStyle.target; ctx.fill(); ctx.strokeStyle = "black"; ctx.lineWidth = 0.5; ctx.stroke();
       return;
     }
     const { naturalWidth: w, naturalHeight: h } = carImage;
-    ctx.save(); ctx.translate(now.x, now.y); ctx.rotate(heading); ctx.scale(CAR_SCALE, CAR_SCALE);
+    ctx.save(); ctx.translate(now.x, now.y); ctx.rotate(heading); ctx.scale(carScale, carScale);
     ctx.drawImage(carImage, -w / 2, -h / 2); ctx.restore();
   }
   carImage.addEventListener("load", () => overlay?.redraw());
@@ -322,7 +322,7 @@ export function temsMapCard() {
     });
     overlay = new Overlay().addTo(map);
     // Dragging the map pauses auto pan until you press it again (TEMS does the same).
-    map.on("dragstart", () => { if (autoPan) { autoPan = false; lsSet(PAN_KEY, "0"); paintPan(); } });
+    map.on("dragstart", () => { if (autoPan) { autoPan = false; lsSet(panKey, "0"); paintPan(); } });
     new ResizeObserver(() => map && map.invalidateSize()).observe(q(".tmMap"));
     poll();
   }).catch((error) => say(error.message));

@@ -43,8 +43,17 @@ def getInt(name):
         raise ConfigError(f"{name} in {envPath} must be a number.")
 
 
-def getBool(name):
+def getBool(name, default=None):
+    """default: used when the setting isn't in .env (None = it must be there)."""
+    if default is not None and not (os.environ.get(name) or "").strip():
+        return default
     return getSetting(name).strip().lower() in ("1", "true", "yes", "on")
+
+
+def getOptional(name, default):
+    """A setting that may be left out of .env (not on the Settings page): its built-in default then."""
+    value = os.environ.get(name)
+    return value if value is not None and value.strip() else default
 
 
 # ---------- web pages ----------
@@ -76,11 +85,12 @@ except ValueError:
 defaultSubmit = getBool("DEFAULT_SUBMIT")
 
 # ---------- End Ticket report defaults ----------
-defaultTotalGrids = getSetting("DEFAULT_TOTAL_GRIDS").strip()
-defaultAttempted = getSetting("DEFAULT_ATTEMPTED").strip()
-defaultSkipped = getSetting("DEFAULT_SKIPPED").strip()
-defaultStatus = getSetting("DEFAULT_STATUS").strip().upper()
-folderNamePrefix = getSetting("FOLDER_NAME_PREFIX")  # not stripped: keeps its trailing space
+# End Ticket report defaults (not on the Settings page: the status sets the grid counts per ticket)
+defaultTotalGrids = getOptional("DEFAULT_TOTAL_GRIDS", "1").strip()
+defaultAttempted = getOptional("DEFAULT_ATTEMPTED", "1").strip()
+defaultSkipped = getOptional("DEFAULT_SKIPPED", "0").strip()
+defaultStatus = getOptional("DEFAULT_STATUS", "PASSED").strip().upper()
+folderNamePrefix = getOptional("FOLDER_NAME_PREFIX", "Cloud WO - ")  # not stripped: keeps its trailing space
 
 # ---------- drive log files ----------
 logRootDir = getPath("LOG_ROOT_DIR")
@@ -91,7 +101,7 @@ workOrderOutputDir = getPath("WORK_ORDER_OUTPUT_DIR")
 gridSummaryFile = getSetting("GRID_SUMMARY_FILE").strip()
 
 # ---------- ActixOne upload ----------
-actixSubmit = getBool("ACTIX_SUBMIT")
+actixSubmit = getBool("ACTIX_SUBMIT", default=True)  # on unless .env says false
 
 # ---------- local ticket records ----------
 ticketStoreFile = getPath("TICKET_STORE_FILE")
@@ -109,6 +119,8 @@ whatsappAutoShare = (os.environ.get("WHATSAPP_AUTO_SHARE") or "true").strip().lo
 
 # ---------- Apeksha (share a location to your site) ----------
 # Optional in .env; defaults to your site.
+# The header's Teams button opens this (e.g. your Teams meeting link); empty = no button.
+teamsUrl = (os.environ.get("TEAMS_URL") or "").strip()
 apekshaUrl = (os.environ.get("APEKSHA_URL") or "https://apekshaapi.thatinsaneguy.com").strip().rstrip("/")
 # The WO box's QR icon: on = posts the WO's Google Maps link to Apeksha; off (default) = shows the
 # link as a QR code (scan it to open the spot, even with little or no internet), the link and lat / long.
@@ -120,7 +132,7 @@ def locationTarget():
     return ("apeksha", "Apeksha") if apekshaEnabled else ("qr", "QR code")
 
 # ---------- tabs ----------
-closeTabsWhenDone = getBool("CLOSE_TABS_WHEN_DONE")
+closeTabsWhenDone = getBool("CLOSE_TABS_WHEN_DONE", default=True)  # on unless .env says false
 
 # ---------- Chrome ----------
 chromePaths = [os.path.expandvars(path) for path in getList("CHROME_PATHS", ";")]

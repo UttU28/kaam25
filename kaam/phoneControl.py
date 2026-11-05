@@ -1,7 +1,7 @@
 """Drive the test phones over adb: unlock, Service Mode + Speedtest split screen, airplane toggle,
 speed test with its result, and which network (NR / LTE) the phone is on.
 
-Phones are named in .env as  PHONES=TMO 1=<serial>,TMO 2=<serial>  (serials from `adb devices`).
+Phones come from .env: PHONE_TMO1 / PHONE_TMO2 = each phone's serial (from `adb devices`), set on Settings.
 The names should match the device names in Vysor, so deskLayout.py can find their windows.
 The Live Testing page in the web app uses this; so do the .bat files:
     venv\\Scripts\\python.exe -m kaam.phoneControl fullTest            (every phone, one after another)
@@ -109,8 +109,15 @@ def connectedSerials():
 # ---------- which phones ----------
 
 def configuredPhones():
-    """{'TMO 1': 'R5CY...', 'TMO 2': '...'} from PHONES in .env, in that order."""
+    """{'TMO 1': 'R5CY...', 'TMO 2': '...'}, in that order: PHONE_TMO1 / PHONE_TMO2 in .env (Settings
+    > Phones), else an older .env's  PHONES=TMO 1=<serial>,TMO 2=<serial>."""
     phones = {}
+    for name, key in (("TMO 1", "PHONE_TMO1"), ("TMO 2", "PHONE_TMO2")):
+        serial = (os.environ.get(key) or "").strip()
+        if serial:
+            phones[name] = serial
+    if phones:
+        return phones
     for item in (os.environ.get("PHONES") or "").split(","):
         if "=" in item:
             name, serial = item.split("=", 1)
@@ -764,6 +771,82 @@ def openSpeedtest(serial):
     say(f"[{phoneName(serial)}] no '{speedtestLabel}' icon on the home screen, opening {speedtestUrl} in Chrome")
     adbShell(serial, f"am start -a android.intent.action.VIEW -d {speedtestUrl} -p com.android.chrome")
     return waitForActivity(serial, "com.android.chrome")
+
+
+def hotspotTile(serial):
+    """The quick panel's Mobile Hotspot tile (the panel must be open): (isOn, x, y) or None."""
+    for node in re.findall(r"<node [^>]*>", dumpScreen(serial)):
+        if 'class="android.widget.Button"' in node and re.search(r'content-desc="[^"]*hotspot[^"]*"', node, re.I):
+            bounds = re.search(r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', node)
+            if bounds:
+                x1, y1, x2, y2 = map(int, bounds.groups())
+                return 'checked="true"' in node, (x1 + x2) // 2, (y1 + y2) // 2
+    return None
+
+
+def setHotspot(serial, on):
+    """Turns Mobile Hotspot on or off: opens the quick panel, taps the tile only if it isn't already
+    that way, closes the panel. The apps on screen (Service Mode / Speedtest) stay as they are.
+    Returns True if it changed something."""
+    name, word = phoneName(serial), "on" if on else "off"
+    wakeAndUnlock(serial)
+    adbShell(serial, "cmd statusbar expand-settings")
+    try:
+        time.sleep(1)
+        tile = hotspotTile(serial)
+        if not tile:
+            raise RuntimeError(f"{name}: no Mobile Hotspot tile in the quick panel - add it there once.")
+        if tile[0] == on:
+            say(f"[{name}] hotspot is already {word}")
+            return False
+        say(f"[{name}] turning hotspot {word}")
+        adbShell(serial, f"input tap {tile[1]} {tile[2]}")
+        for _ in range(8):
+            time.sleep(1)
+            now = hotspotTile(serial)
+            if now and now[0] == on:
+                say(f"[{name}] hotspot {word}")
+                return True
+        raise RuntimeError(f"{name}: tapped Mobile Hotspot, but it didn't turn {word} - check the phone.")
+    finally:
+        adbShell(serial, "cmd statusbar collapse")
+
+
+def hotspotScore(network):
+    """Higher = better network to share. NR counts 10 dB extra over LTE (so a much stronger LTE
+    still wins), then RSRP, then SINR. None = no service."""
+    tech = (network or {}).get("tech")
+    if tech not in ("NR", "LTE"):
+        return None
+    def number(key, default):
+        try:
+            return float(network.get(key))
+        except (TypeError, ValueError):
+            return default
+    return (number("rsrp", -140) + (10 if tech == "NR" else 0), number("sinr", -20))
+
+
+def hotspotOnBest(serials, readings=None):
+    """Hotspot on the phone with the best network right now, off on the others (same name and
+    password on every phone, so devices just reconnect). Only when asked - never switches by itself."""
+    readings = readings or {}
+    scored = []
+    for serial in serials:
+        network = readings.get(serial) or readNetwork(serial)
+        score = hotspotScore(network)
+        say(f"[{phoneName(serial)}] {networkText(network)}")
+        if score is not None:
+            scored.append((score, serial, network))
+    if not scored:
+        raise RuntimeError("No phone has service right now - no hotspot started.")
+    _, best, network = max(scored)
+    name = phoneName(best)
+    for serial in serials:  # the others off first, so only one hotspot with that name is up
+        if serial != best:
+            setHotspot(serial, False)  # reads the tile; taps only if it's on
+    changed = setHotspot(best, True)
+    why = networkText(network)
+    return f"Hotspot {'on' if changed else 'already on'}: {name} ({why})."
 
 
 def wakeAndUnlock(serial):

@@ -1,20 +1,20 @@
-// Close: finish the day's PASSED cloud ticket in TechInsights, step by step.
+// Close: finish the day's cloud ticket (PASSED, SKIPPED or FAILED) in TechInsights, step by step.
 import { $, api, enc, esc, icon, niceTime, onDataChange, refreshState, toast } from "../core.js";
 import { jobPanel, statusBadge, woBox } from "../components.js";
 
 export default {
   title: "Close Ticket",
-  sub: "Finish the day's PASSED cloud ticket in TechInsights",
+  sub: "Finish the day's cloud ticket in TechInsights",
   render(root, params) {
     let record = null, busy = false;
     root.innerHTML = `
       <div class="grid colsMainSide">
         <div class="stack">
           <div class="card">
-            <div class="cardHead"><h2>Ticket</h2><span class="hint">Only PASSED cloud tickets can be closed</span></div>
+            <div class="cardHead"><h2>Ticket</h2><span class="hint">Cloud tickets: PASSED, SKIPPED or FAILED</span></div>
             <div class="cardBody stack">
               <div class="woSlot"></div>
-              <div class="kv info"></div>
+              <div class="kv woInfo"></div>
               <div class="divider"></div>
               <div class="sectionT">Close steps</div>
               <div class="steps"></div>
@@ -56,7 +56,7 @@ export default {
     function paint(wo, keepMessage = false) {
       const r = record || {};
       const close = r.close || { steps: [], canClose: false };
-      q(".info").innerHTML = record ? [
+      q(".woInfo").innerHTML = record ? [
         ["Ticket", r.ticketId || "—"], ["Status", statusBadge(r.status) || "—"], ["EQ3", r.eq3 || "—"], ["EQ6", r.eq6 || "—"],
       ].map(([k, v]) => `<div><div class="k">${k}</div><div class="v">${k === "Status" ? v : esc(v)}</div></div>`).join("") : "";
       const steps = close.steps.length ? close.steps : [
@@ -71,7 +71,7 @@ export default {
         </div>`).join("") + (r.closedAt ? `<div class="callout ok" style="margin-top:8px">${icon("lock", "sm")}<div>Closed ${esc(niceTime(r.closedAt))}</div></div>` : "");
       q(".go").classList.toggle("hidden", !(close.canClose && !busy));
       if (!busy && !keepMessage) {
-        if (!wo) msg("Pick a PASSED ticket from Ready to close, or type its WO.", "info");
+        if (!wo) msg("Pick a ticket from Ready to close, or type its WO.", "info");
         else msg(close.reason || "Not in Records - run Start / End Ticket for it first.",
           close.canClose ? "info" : record ? "warn" : "bad");
       }
