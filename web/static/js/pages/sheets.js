@@ -30,8 +30,8 @@ export default {
       <div class="card sheetCard" data-t="${t.key}">
         <div class="cardHead"><h2>${t.title}</h2><span class="hint count"></span>
           <div class="actions">
-            <label class="note sheetHead"><input type="checkbox" class="withHeader"> Include headings</label>
-            <button class="btn btnPrimary copyAll" disabled>${icon("copy", "sm")}<span>Copy for Excel</span></button>
+            <label class="checkPill" title="Include the column headings in the copy"><input type="checkbox" class="withHeader"><span class="long">Include headings</span><span class="short">Headings</span></label>
+            <button class="btn btnPrimary copyAll" disabled title="Copy the table - paste into Excel with Ctrl+V">${icon("copy", "sm")}<span>Copy for Excel</span></button>
             ${t.send ? `<button class="btn btnWa sendWo" disabled title="Sends the whole list - one '<WO> - Done' line each - in one message to the WhatsApp WO group">${icon("whatsapp", "sm")}<span>Send to WO group</span></button>` : ""}
           </div></div>
         <div class="cardBody"><div class="sheetWrap"><div class="empty">Loading…</div></div></div>

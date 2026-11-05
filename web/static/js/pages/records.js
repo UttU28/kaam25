@@ -126,7 +126,7 @@ export default {
             <div class="main">
               <div class="wo" title="${esc(r.wo)}">${esc(r.wo)}</div>
               <div class="sub">${esc(r.ticketId || "no ticket")}${r.gridKey ? ` · <span class="gridShort" title="Grid key ${esc(r.gridKey)}${r.gridCount > 1 ? ` (+${r.gridCount - 1} more)` : ""}">${esc(shortGridKey(r.gridKey))}${r.gridCount > 1 ? ` +${r.gridCount - 1}` : ""}</span>` : ""} · ${eq}</div>
-              <div class="tags">${typeBadge(r.startType)}${progressBadge(r)}</div>
+              <div class="tags">${typeBadge(r.startType, true)}${progressBadge(r, true)}</div>
             </div>
             <div class="side">${statusBadge(r.status) || ""}<span class="time">${time}</span>${r.startedAt && r.startType !== "manual" ? waDot(r) : ""}</div>
           </div>`;

@@ -60,6 +60,7 @@ In that Chrome: be signed in to TechInsights, ActixOne and **WhatsApp Web**, and
 | **Maps** | Today's (or tomorrow's) WOs on the map with the shortest route; the order you set is the order Start lists them. |
 | **Sheets** | Today's tables for Excel; **Send to WO group** sends the done list to WhatsApp. |
 | **Records** | Everything saved. Tick pending WOs to **Move to today**, or (all already today's) **Move to tomorrow** to plan the next day tonight. |
+| **Settings** | Every `.env` value (saved, then the app restarts) and **Theme**: Classic, Retro (phosphor terminal) or Aurora (glass under northern lights) - all dark, changes at once, remembered per browser. |
 
 In every WO box: the copy icon copies the preview (WO / Grid Key / Location), the **QR icon** shows
 the WO's Google Maps link (`https://www.google.com/maps?q=<lat>,<lon>`) as a QR code - scan it with

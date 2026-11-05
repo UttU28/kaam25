@@ -1,0 +1,210 @@
+/* Retro: a phosphor CRT terminal. Amber text on black glass with a green signal colour, one
+   monospace font (VT323 for headings and big numbers), square boxes, bracketed badges, a soft
+   glow and faint scanlines. Only applies with <html data-theme="retro"> (Settings > Theme). */
+:root[data-theme="retro"] {
+  --bg: #0a0805;
+  --panel: #0f0c07;
+  --panel2: #130f08;
+  --field: #070503;
+  --fieldHover: #120d06;
+  --border: #3d2d10;
+  --borderStrong: #6b4e1b;
+  --text: #ffcf7a;
+  --muted: #d19a45;
+  --faint: #8a6630;
+  --accent: #ffb000;
+  --accentSoft: rgba(255, 176, 0, .12);
+  --green: #5dff8a;
+  --greenSoft: rgba(93, 255, 138, .1);
+  --amber: #ffd84d;
+  --amberSoft: rgba(255, 216, 77, .12);
+  --red: #ff5c4d;
+  --redSoft: rgba(255, 92, 77, .12);
+  --purple: #ff8fe1;
+  --purpleSoft: rgba(255, 143, 225, .11);
+  --wa: #5dff8a;
+  --waSoft: rgba(93, 255, 138, .1);
+  --ink: #120c02;
+  --radius: 0px;
+  --radiusSm: 0px;
+  --shadow: 0 0 0 1px #2a1f0b, 0 12px 30px rgba(0, 0, 0, .6);
+  --sans: "IBM Plex Mono", "Cascadia Code", Consolas, monospace;
+  --mono: "IBM Plex Mono", "Cascadia Code", Consolas, monospace;
+  --display: "VT323", "IBM Plex Mono", monospace;
+}
+[data-theme="retro"] body { font-size: 13.5px; text-shadow: 0 0 6px rgba(255, 176, 0, .25); }
+[data-theme="retro"] ::selection { background: var(--accent); color: var(--ink); text-shadow: none; }
+[data-theme="retro"] ::-webkit-scrollbar-thumb { background: #3d2d10; border-radius: 0; border: 2px solid var(--bg); }
+/* scanlines + the tube's dark edge, over everything but never in the way */
+[data-theme="retro"] body::before { content: ""; position: fixed; inset: 0; z-index: 2000; pointer-events: none;
+  background: repeating-linear-gradient(180deg, rgba(0, 0, 0, .18) 0 1px, transparent 1px 3px); }
+[data-theme="retro"] body::after { content: ""; position: fixed; inset: 0; z-index: 2001; pointer-events: none;
+  background: radial-gradient(ellipse at center, transparent 65%, rgba(0, 0, 0, .45) 100%); }
+@keyframes retroBlink { 50% { opacity: 0; } }
+
+/* every corner square */
+[data-theme="retro"] *, [data-theme="retro"] *::before, [data-theme="retro"] *::after { border-radius: 0 !important; }
+[data-theme="retro"] .dot, [data-theme="retro"] .liveDot, [data-theme="retro"] .spinner, [data-theme="retro"] .rsDot,
+[data-theme="retro"] .mfDot, [data-theme="retro"] .meDot, [data-theme="retro"] .mk, [data-theme="retro"] .tDot { border-radius: 50% !important; }
+
+/* headings and big numbers in the terminal display face */
+[data-theme="retro"] .pageHeading h1, [data-theme="retro"] .cardHead h2, [data-theme="retro"] .heroCard h2,
+[data-theme="retro"] .stat .n, [data-theme="retro"] .heroCard .bigId, [data-theme="retro"] .brandText,
+[data-theme="retro"] .dTitle h2, [data-theme="retro"] .resultId, [data-theme="retro"] .speedBig,
+[data-theme="retro"] .modal h3, [data-theme="retro"] .phoneHead h2, [data-theme="retro"] .panel h3,
+[data-theme="retro"] .fold > summary h3, [data-theme="retro"] .sig .v {
+  font-family: var(--display); font-weight: 400; letter-spacing: .8px;
+}
+[data-theme="retro"] .pageHeading h1 { font-size: 34px; line-height: 1; }
+[data-theme="retro"] .pageHeading h1::before { content: "> "; color: var(--green); }
+[data-theme="retro"] .pageHeading h1::after { content: "_"; animation: retroBlink 1s steps(1) infinite; }
+[data-theme="retro"] .pageHeading p::before { content: "// "; }
+[data-theme="retro"] .cardHead h2 { font-size: 24px; text-transform: uppercase; line-height: 1; }
+[data-theme="retro"] .cardHead h2::before { content: "■ "; font-size: 14px; color: var(--accent); vertical-align: 3px; }
+[data-theme="retro"] .modal h3, [data-theme="retro"] .panel h3, [data-theme="retro"] .fold > summary h3 { font-size: 22px; text-transform: uppercase; }
+[data-theme="retro"] .heroCard h2 { font-size: 40px; line-height: 1; }
+[data-theme="retro"] .heroCard .bigId { font-size: 52px; line-height: 1; color: var(--green); text-shadow: 0 0 12px rgba(93, 255, 138, .55); }
+[data-theme="retro"] .heroCard .eyebrow { color: var(--green); }
+[data-theme="retro"] .heroCard .eyebrow::before { content: "## "; }
+[data-theme="retro"] .stat .n { font-size: 44px; line-height: 1; }
+[data-theme="retro"] .stat .t, [data-theme="retro"] .navSection, [data-theme="retro"] .label, [data-theme="retro"] table.sheet th {
+  text-transform: uppercase; letter-spacing: 1px; font-size: 11px;
+}
+[data-theme="retro"] .speedBig { font-size: 44px; }
+[data-theme="retro"] .sig .v { font-size: 30px; }
+[data-theme="retro"] .resultId { font-size: 44px; color: var(--green); }
+
+/* sidebar */
+[data-theme="retro"] .sidebar { background: var(--bg); border-right: 1px dashed var(--border); }
+[data-theme="retro"] .brandMark { background: transparent; border: 1px solid var(--accent); box-shadow: 0 0 12px rgba(255, 176, 0, .35); }
+[data-theme="retro"] .brandMark svg { fill: var(--accent); }
+[data-theme="retro"] .brandText { font-size: 24px; line-height: .9; }
+[data-theme="retro"] .brandText small { font-family: var(--sans); font-size: 10.5px; letter-spacing: .5px; }
+[data-theme="retro"] .navSection::before { content: "[ "; }
+[data-theme="retro"] .navSection::after { content: " ]"; }
+[data-theme="retro"] .nav a { text-transform: uppercase; font-size: 12.5px; letter-spacing: .5px; font-weight: 500; }
+[data-theme="retro"] .nav a:hover { background: var(--panel2); color: var(--text); }
+[data-theme="retro"] .nav a.active { background: var(--accent); color: var(--ink); text-shadow: none; }
+[data-theme="retro"] .nav a.active .i { color: var(--ink); }
+[data-theme="retro"] .nav .count { background: transparent; color: var(--green); border: 1px solid var(--green); }
+[data-theme="retro"] .nav .count.hot { color: var(--amber); border-color: var(--amber); }
+[data-theme="retro"] .nav a.active .count { color: var(--ink); border-color: var(--ink); }
+[data-theme="retro"] .sidebarFoot { border-top: 1px dashed var(--border); }
+[data-theme="retro"] .dot.on { box-shadow: 0 0 8px var(--green); }
+
+/* top bar */
+[data-theme="retro"] .topbar { background: rgba(10, 8, 5, .94); border-bottom: 1px dashed var(--border); backdrop-filter: none; }
+[data-theme="retro"] .searchTrigger { border-style: dashed; }
+[data-theme="retro"] kbd { background: transparent; color: var(--accent); border-color: var(--accent); }
+[data-theme="retro"] .jobsPill { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+[data-theme="retro"] .teamsBtn { color: var(--purple); }
+[data-theme="retro"] .teamsBtn:hover { color: var(--ink); background: var(--purple); border-color: var(--purple); }
+
+/* cards: a double rule, like a box drawn in characters */
+[data-theme="retro"] .card, [data-theme="retro"] .stat, [data-theme="retro"] .panel, [data-theme="retro"] .heroCard {
+  background: var(--panel); border: 1px solid var(--border);
+  box-shadow: inset 0 0 0 3px var(--panel), inset 0 0 0 4px #241a09;
+}
+[data-theme="retro"] .heroCard { background: var(--panel); }
+[data-theme="retro"] .cardHead { border-bottom: 1px dashed var(--border); }
+[data-theme="retro"] .stat:hover { background: var(--panel2); border-color: var(--borderStrong); }
+[data-theme="retro"] .detail { background: var(--panel); }
+
+/* inputs */
+[data-theme="retro"] .input, [data-theme="retro"] .textarea { background: var(--field); caret-color: var(--green); }
+[data-theme="retro"] .input:focus, [data-theme="retro"] .textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent), 0 0 12px rgba(255, 176, 0, .25); }
+[data-theme="retro"] .input[readonly] { background: #0b0805; }
+[data-theme="retro"] .input::placeholder, [data-theme="retro"] .textarea::placeholder { color: #6b4f24; }
+[data-theme="retro"] select.input option { background: var(--panel); }
+
+/* buttons: outlined amber, solid with a glow when they matter */
+[data-theme="retro"] .btn { text-transform: uppercase; letter-spacing: .8px; font-size: 12px; font-weight: 600; text-shadow: none; }
+[data-theme="retro"] .btn.lg { font-size: 13px; }
+[data-theme="retro"] .btnPrimary { background: var(--accent); color: var(--ink); box-shadow: 0 0 14px rgba(255, 176, 0, .35); }
+[data-theme="retro"] .btnPrimary:hover:not(:disabled) { background: #ffc233; }
+[data-theme="retro"] .btnGreen, [data-theme="retro"] .btnWa { background: var(--green); color: #031a09; box-shadow: 0 0 14px rgba(93, 255, 138, .3); }
+[data-theme="retro"] .btnGreen:hover:not(:disabled), [data-theme="retro"] .btnWa:hover:not(:disabled) { background: #85ffa6; }
+[data-theme="retro"] .btnAmber { background: var(--amber); color: var(--ink); }
+[data-theme="retro"] .btnAmber:hover:not(:disabled) { background: #ffe27a; }
+[data-theme="retro"] .btnPurple { background: var(--purple); color: #1d0a17; }
+[data-theme="retro"] .btnPurple:hover:not(:disabled) { background: #ffaee9; }
+[data-theme="retro"] .btnGhost { background: transparent; border-color: var(--accent); color: var(--accent); }
+[data-theme="retro"] .btnGhost:hover:not(:disabled) { background: var(--accent); color: var(--ink); }
+[data-theme="retro"] .btnDanger { border-color: var(--red); color: var(--red); }
+[data-theme="retro"] .btnStop { background: transparent; border-color: var(--red); color: var(--red); }
+[data-theme="retro"] .btn.flashBad { color: var(--ink) !important; }
+[data-theme="retro"] .iconBtn:hover { background: var(--panel2); color: var(--accent); }
+[data-theme="retro"] .seg button:hover:not(.on) { background: var(--panel2); }
+[data-theme="retro"] .seg button.on { color: var(--segInk, var(--ink)); box-shadow: 0 0 12px rgba(255, 176, 0, .3); text-shadow: none; text-transform: uppercase; }
+[data-theme="retro"] .statusSeg button.on[data-v="FAILED"] { --segInk: var(--ink); }
+[data-theme="retro"] .switch .track { background: transparent; border: 1px solid var(--borderStrong); }
+[data-theme="retro"] .switch .track::after { background: var(--faint); top: 2px; left: 2px; }
+[data-theme="retro"] .switch input:checked + .track { background: var(--accent); border-color: var(--accent); }
+[data-theme="retro"] .switch input:checked + .track::after { background: var(--ink); }
+
+/* badges, chips, notes */
+[data-theme="retro"] .badge { background: transparent !important; border: 1px solid currentColor; text-transform: uppercase; text-shadow: none; }
+[data-theme="retro"] .badge::before { content: "["; }
+[data-theme="retro"] .badge::after { content: "]"; }
+[data-theme="retro"] .badge.iconOnly::before, [data-theme="retro"] .badge.iconOnly::after { content: none; }
+[data-theme="retro"] .bBlue { color: #6fd8ff; }
+[data-theme="retro"] .bPurple { color: var(--purple); }
+[data-theme="retro"] .chip { background: transparent; border-style: dashed; }
+[data-theme="retro"] .waDot.sent { filter: drop-shadow(0 0 5px rgba(93, 255, 138, .6)); }
+[data-theme="retro"] .note.bad { color: var(--red); }
+[data-theme="retro"] .note.info { color: #6fd8ff; }
+[data-theme="retro"] .callout { background: transparent !important; border-style: dashed; }
+[data-theme="retro"] .callout.info { color: #6fd8ff; border-color: #6fd8ff; }
+[data-theme="retro"] .callout.warn { color: var(--amber); border-color: var(--amber); }
+[data-theme="retro"] .callout.ok { color: var(--green); border-color: var(--green); }
+[data-theme="retro"] .callout.bad { color: var(--red); border-color: var(--red); }
+[data-theme="retro"] .pre, [data-theme="retro"] .panel .pre, [data-theme="retro"] .setCmd code, [data-theme="retro"] .chRow code {
+  background: var(--field); color: var(--green); border-style: dashed; text-shadow: 0 0 6px rgba(93, 255, 138, .4);
+}
+
+/* lists, records, tables, job log */
+[data-theme="retro"] .popover, [data-theme="retro"] .palette { background: var(--panel); border-color: var(--borderStrong); }
+[data-theme="retro"] .popItem:hover, [data-theme="retro"] .popItem.sel { background: var(--accent); color: var(--ink); text-shadow: none; }
+[data-theme="retro"] .popItem:hover .subT, [data-theme="retro"] .popItem.sel .subT { color: var(--ink); }
+[data-theme="retro"] .listItem:hover, [data-theme="retro"] .rec:hover { background: var(--panel2); }
+[data-theme="retro"] .rec.sel { background: #1a1309; border-color: var(--accent); }
+[data-theme="retro"] .rec.sel::before { background: var(--accent); }
+[data-theme="retro"] .filter.on { background: var(--accent); border-color: var(--accent); color: var(--ink); text-shadow: none; }
+[data-theme="retro"] .filter.on .n { color: var(--ink); }
+[data-theme="retro"] .dayDiv { color: var(--green); }
+[data-theme="retro"] .dayDiv.today::after { background: var(--green); opacity: .5; }
+[data-theme="retro"] .empty .i { color: var(--borderStrong); }
+[data-theme="retro"] .dropzone { border-style: dashed; }
+[data-theme="retro"] .dropzone:hover, [data-theme="retro"] .dropzone.over { color: var(--accent); }
+[data-theme="retro"] .job { background: var(--field); border-style: dashed; }
+[data-theme="retro"] .jobLines { color: var(--green); }
+[data-theme="retro"] .jobResult.ok { color: var(--green); background: var(--greenSoft); }
+[data-theme="retro"] .jobResult.bad { color: var(--red); background: var(--redSoft); }
+[data-theme="retro"] .spinner { border-color: rgba(255, 176, 0, .2); border-top-color: var(--accent); }
+[data-theme="retro"] .step .ball { background: transparent; }
+[data-theme="retro"] .step.done .ball { border-color: var(--green); }
+[data-theme="retro"] table.sheet th { color: var(--green); background: var(--panel2); border-bottom-style: dashed; }
+[data-theme="retro"] table.sheet td { border-color: #2e220c; }
+[data-theme="retro"] table.sheet tbody tr:hover td { background: var(--panel2); }
+[data-theme="retro"] table.sheet tr.missingRow td { background: rgba(255, 92, 77, .08); }
+[data-theme="retro"] .flowRow { border-top-style: dotted; }
+[data-theme="retro"] .planTable a.wo:hover { color: var(--green); }
+
+/* toasts, pop-ups, the search palette */
+[data-theme="retro"] .toast { background: var(--panel); border: 1px solid var(--accent); box-shadow: 0 0 18px rgba(255, 176, 0, .25), 0 10px 30px rgba(0, 0, 0, .6); }
+[data-theme="retro"] .toast.ok { border-color: var(--green); }
+[data-theme="retro"] .toast.bad { border-color: var(--red); }
+[data-theme="retro"] .toast.warn { border-color: var(--amber); }
+[data-theme="retro"] .toast::before { content: ">"; color: var(--green); }
+[data-theme="retro"] .backdrop { background: rgba(4, 3, 1, .78); backdrop-filter: none; }
+[data-theme="retro"] .modal { background: var(--panel); border: 1px solid var(--accent); box-shadow: inset 0 0 0 3px var(--panel), inset 0 0 0 4px #3d2d10, 0 0 30px rgba(255, 176, 0, .2); }
+
+/* maps and the TEMS map */
+[data-theme="retro"] .mapsMap .leaflet-container, [data-theme="retro"] .mapsMap.leaflet-container { background: #050402; }
+[data-theme="retro"] .mapsMap .leaflet-tile-pane { filter: sepia(1) hue-rotate(-12deg) saturate(1.6) brightness(.8) contrast(1.1); }
+[data-theme="retro"] .mapsMap .leaflet-popup-content-wrapper, [data-theme="retro"] .mapsMap .leaflet-popup-tip { background: var(--panel); border: 1px solid var(--accent); }
+[data-theme="retro"] .mk { border-color: var(--bg); }
+[data-theme="retro"] .mk.missed { background: var(--bg); }
+[data-theme="retro"] .mapsMap .leaflet-control-attribution { background: rgba(10, 8, 5, .8); }
+[data-theme="retro"] .picImg { background: #000; }
+[data-theme="retro"] .temsEnd { border-style: dashed; }

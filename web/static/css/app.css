@@ -215,8 +215,10 @@ kbd { font: 600 10.5px var(--sans); padding: 2px 6px; border-radius: 5px; backgr
 .bPurple { background: var(--purpleSoft); color: #c3a8ff; }
 .bGrey { background: #1d222b; color: var(--muted); }
 .bWa { background: var(--waSoft); color: var(--wa); }
-.waDot { display: inline-grid; place-items: center; width: 20px; height: 18px; border-radius: 9px; font-size: 10px; font-weight: 800; background: #222833; color: var(--faint); }
-.waDot.sent { background: var(--wa); color: var(--ink); }
+/* WhatsApp status: the logo - green once the summary is shared, dim until then */
+.waDot { display: inline-grid; place-items: center; width: 20px; height: 20px; flex: none; color: var(--faint); opacity: .55; }
+.waDot .i { width: 16px; height: 16px; }
+.waDot.sent { color: var(--wa); opacity: 1; filter: drop-shadow(0 0 4px var(--waSoft)); }
 
 /* messages */
 .note { font-size: 12.5px; color: var(--muted); line-height: 1.5; white-space: pre-line; }
@@ -396,7 +398,10 @@ kbd { font: 600 10.5px var(--sans); padding: 2px 6px; border-radius: 5px; backgr
 .rec .main { min-width: 0; }
 .rec .wo { font-weight: 650; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rec .sub { font: 11.5px var(--mono); color: var(--muted); margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.rec .tags { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.rec .tags { display: flex; gap: 6px; flex-wrap: nowrap; margin-top: 8px; }
+/* icon-only badges (the Records list): a small square, the word shows on hover */
+.badge.iconOnly { padding: 3px; min-width: 22px; justify-content: center; }
+.badge.iconOnly .i { margin: 0; }
 .rec .side { display: flex; flex-direction: column; align-items: flex-end; gap: 7px; padding-top: 1px; }
 .rec .time { font-size: 11px; color: var(--faint); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .check { width: 16px; height: 16px; margin: 2px 0 0; accent-color: var(--purple); cursor: pointer; }
@@ -525,6 +530,11 @@ kbd { font: 600 10.5px var(--sans); padding: 2px 6px; border-radius: 5px; backgr
 /* The map (Leaflet) draws its own layers at z-index 400+; keep them inside the map box so
    menus, popups and the sidebar always sit on top. */
 .mapsMap { isolation: isolate; }
+/* An open dropdown (the WO box's list) must sit over the cards below it - the TEMS map, phone
+   cards, tables. The box's tool strip is shifted with transform, and some cards are their own
+   layer (Aurora's glass), so lift both while a dropdown is open. Kept under the sticky top bar. */
+.woBox.compact .insideTools { z-index: 15; }
+.card:has(.popover), .panel:has(.popover), .detail:has(.popover), .liveTop:has(.popover) { position: relative; z-index: 15; }
 .navScrim { display: none; }
 
 /* Half-screen: the sidebar shrinks to an icon strip that is always there (names on hover). */
@@ -584,9 +594,12 @@ kbd { font: 600 10.5px var(--sans); padding: 2px 6px; border-radius: 5px; backgr
 .msDateWrap { flex: 1; position: relative; display: flex; align-items: center; gap: 8px; height: 38px; padding: 0 12px; border-radius: 10px;
   background: var(--field); border: 1px solid var(--borderStrong); color: var(--muted); cursor: pointer; }
 .msDateWrap:hover { background: var(--fieldHover); }
-.msDateWrap .i:last-child { margin-left: auto; pointer-events: none; }
-.msDate { flex: 1; min-width: 0; height: 100%; background: transparent; border: 0; outline: none; appearance: none; cursor: pointer;
-  color: var(--text); font-weight: 650; font-size: 13.5px; }
+.msDateWrap .i { pointer-events: none; }
+.msDateWrap .i:last-child { margin-left: auto; }
+/* The day list covers the whole box (calendar, text and arrow), so a click anywhere opens it. */
+.msDate { position: absolute; inset: 0; width: 100%; min-width: 0; height: 100%; padding: 0 36px 0 37px; background: transparent; border: 0;
+  outline: none; appearance: none; cursor: pointer; color: var(--text); font-weight: 650; font-size: 13.5px; }
+.msDateWrap:focus-within { border-color: var(--accent); }
 .msDate option { background: var(--panel); color: var(--text); }
 .msTop .btn { height: 38px; width: 38px; padding: 0; justify-content: center; }
 .msStats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
@@ -846,6 +859,70 @@ table.sheet td.num { color: var(--faint); width: 1%; }
 table.sheet tr.missingRow td { background: color-mix(in srgb, var(--red) 9%, transparent); }
 .missingList { margin-top: 8px; max-height: 220px; overflow: auto; }
 
+/* Settings > Theme: one tile per look, each preview in its own fixed colours */
+.themePick { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+@container card (max-width: 640px) { .themePick { grid-template-columns: minmax(0, 1fr); } }
+.themeOpt { display: flex; flex-direction: column; align-items: stretch; gap: 4px; padding: 10px; text-align: left; cursor: pointer;
+  background: var(--panel2); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); transition: border-color .15s, box-shadow .15s; }
+.themeOpt:hover { border-color: var(--borderStrong); }
+.themeOpt.on { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accentSoft); }
+.themeOpt.on .themeName::after { content: " ✓"; color: var(--accent); }
+.themeName { font-weight: 700; font-size: 14px; margin-top: 6px; }
+.themeAbout { font-size: 12px; color: var(--muted); line-height: 1.4; }
+.themeSwatch { position: relative; display: block; height: 78px; overflow: hidden; border-radius: 8px; border: 1px solid rgba(255, 255, 255, .08); }
+.themeSwatch i { position: absolute; display: block; }
+.themeSwatch i:nth-child(1) { left: 0; top: 0; bottom: 0; width: 22%; }
+.themeSwatch i:nth-child(2) { left: 28%; top: 14px; width: 40%; height: 10px; }
+.themeSwatch i:nth-child(3) { left: 28%; top: 34px; width: 26%; height: 22px; }
+.themeSwatch b { position: absolute; right: 10px; bottom: 6px; font-size: 22px; line-height: 1; }
+.themeSwatch.classic { background: #0b0d11; }
+.themeSwatch.classic i:nth-child(1) { background: #12151b; border-right: 1px solid #242a34; }
+.themeSwatch.classic i:nth-child(2) { background: #242a34; border-radius: 4px; }
+.themeSwatch.classic i:nth-child(3) { background: #5b8cff; border-radius: 6px; }
+.themeSwatch.classic b { color: #e8eaf0; font-family: "Segoe UI", system-ui, sans-serif; }
+.themeSwatch.retro { background: #0a0805 repeating-linear-gradient(180deg, rgba(0, 0, 0, .3) 0 1px, transparent 1px 3px); }
+.themeSwatch.retro i:nth-child(1) { background: #0a0805; border-right: 1px dashed #4a3613; }
+.themeSwatch.retro i:nth-child(2) { background: #4a3613; }
+.themeSwatch.retro i:nth-child(3) { background: #ffb000; box-shadow: 0 0 10px rgba(255, 176, 0, .5); }
+.themeSwatch.retro b { color: #5dff8a; font-family: "VT323", "Consolas", monospace; text-shadow: 0 0 8px rgba(93, 255, 138, .6); font-weight: 400; font-size: 28px; }
+.themeSwatch.aurora { background: radial-gradient(90px 70px at 15% 10%, #3b2cff, transparent 70%), radial-gradient(90px 70px at 90% 60%, #b23cff, transparent 70%), radial-gradient(80px 60px at 50% 120%, #00c2a8, transparent 70%), #070912; }
+.themeSwatch.aurora i:nth-child(1) { background: rgba(10, 13, 28, .55); border-right: 1px solid rgba(255, 255, 255, .1); }
+.themeSwatch.aurora i:nth-child(2) { background: rgba(255, 255, 255, .14); border-radius: 999px; }
+.themeSwatch.aurora i:nth-child(3) { background: linear-gradient(135deg, #7a6bff, #c86bff 52%, #ff7ab8); border-radius: 10px; box-shadow: 0 4px 14px rgba(160, 110, 255, .5); }
+.themeSwatch.aurora b { background: linear-gradient(90deg, #4ff0b4, #5cc8ff); -webkit-background-clip: text; background-clip: text; color: transparent; font-family: "Space Grotesk", "Segoe UI", sans-serif; }
+
 /* Settings: a command to run (e.g. adb devices for a phone's ID) */
 .setCmd { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
 .setCmd code { font: 12.5px var(--mono); background: #0d1015; border: 1px solid var(--border); border-radius: 6px; padding: 3px 8px; color: #d9dde6; }
+
+/* ---------- card headers that fit any width (full / half screen, tablet either way round) ----------
+   Each card sizes itself from its own width: the title stays on one line, the hint shortens, and
+   when the card is narrow its header buttons become icon buttons (the name shows on hover). */
+.card { container: card / inline-size; }
+.card.phoneCard { container: phone card / inline-size; }  /* keeps its own phone queries too */
+.cardHead { flex-wrap: nowrap; row-gap: 8px; min-width: 0; }
+.cardHead h2 { white-space: nowrap; display: flex; align-items: center; gap: 8px; }
+.cardHead .hint { min-width: 0; flex: 0 1 auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cardHead .actions, .cardHead > .btn { margin-left: auto; }
+.cardHead .actions { flex-wrap: nowrap; align-items: center; }
+.cardHead .actions .btn, .cardHead > .btn { flex: none; }
+/* a checkbox that sits with the header buttons, e.g. Sheets' Include headings */
+.checkPill { display: inline-flex; align-items: center; gap: 7px; height: 32px; padding: 0 10px; border: 1px solid var(--border);
+  border-radius: var(--radiusSm); background: var(--field); color: var(--muted); font-size: 12.5px; cursor: pointer; white-space: nowrap; user-select: none; }
+.checkPill:hover { border-color: var(--borderStrong); color: var(--text); }
+.checkPill input { margin: 0; accent-color: var(--accent); }
+.checkPill .short { display: none; }
+@container card (max-width: 900px) {
+  /* the label (a <span> or plain text) is hidden by sizing it to 0; the icon has its own size */
+  .cardHead .actions .btn, .cardHead > .btn { width: 40px; padding: 0; gap: 0; font-size: 0; }
+  .cardHead .actions .btn > span:not(.i), .cardHead > .btn > span:not(.i) { display: none; }
+  .cardHead .actions .btn.sm, .cardHead > .btn.sm { width: 32px; }
+  .cardHead .actions .btn .i, .cardHead > .btn .i { width: 17px; height: 17px; }
+  .checkPill .long { display: none; }
+  .checkPill .short { display: inline; }
+}
+@container card (max-width: 560px) {
+  .cardHead { flex-wrap: wrap; }
+  .cardHead .hint { order: 5; flex-basis: 100%; white-space: normal; }
+  .cardHead .actions { gap: 6px; }
+}

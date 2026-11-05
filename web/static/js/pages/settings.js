@@ -4,6 +4,12 @@ import { $, $$, ago, api, copyWithFlash, esc, icon, modal, niceTime, setWhatsapp
 import { switchEl } from "../components.js";
 
 const monoTypes = new Set(["url", "email", "dir", "path", "list", "readonly"]);
+// The looks (all dark) - theme.js applies them; this is only the picker.
+const themeOptions = [
+  { key: "classic", name: "Classic", about: "The original: quiet, flat, blue accent." },
+  { key: "retro", name: "Retro", about: "A phosphor terminal: amber on black, scanlines." },
+  { key: "aurora", name: "Aurora", about: "Frosted glass under northern lights." },
+];
 const justSavedKey = "kaamSettingsJustSaved";
 
 export default {
@@ -38,6 +44,14 @@ export default {
       ${justSaved.length ? `<div class="callout ok" style="margin-bottom:16px">${icon("check", "sm")}<div>
           <b>Saved and restarted - ${justSaved.length} setting${justSaved.length === 1 ? "" : "s"} changed:</b>
           <div class="changeList" style="margin-top:8px">${justSaved.map(changeRow).join("")}</div></div></div>` : ""}
+      <div class="card themeCard">
+        <div class="cardHead"><h2>Theme</h2><span class="hint">Changes at once · remembered in this browser</span></div>
+        <div class="cardBody"><div class="themePick">${themeOptions.map((t) => `
+          <button class="themeOpt" data-theme-pick="${t.key}" aria-pressed="false">
+            <span class="themeSwatch ${t.key}"><i></i><i></i><i></i><b>Aa</b></span>
+            <span class="themeName">${esc(t.name)}</span><span class="themeAbout">${esc(t.about)}</span>
+          </button>`).join("")}</div></div>
+      </div>
       <div class="card">
         <div class="cardHead"><h2>Chrome extension</h2></div>
         <div class="cardBody stack">
@@ -114,6 +128,24 @@ export default {
     paint();
 
     $$(".copyCmd", root).forEach((button) => button.addEventListener("click", () => copyWithFlash(button, button.dataset.cmd)));
+
+    // ----- theme: applies at once, no save / restart -----
+    const paintTheme = () => {
+      if (!root.isConnected || !$(".themePick", root)) { window.removeEventListener("kaamThemeChange", paintTheme); return; }
+      const current = window.kaamTheme?.get() || "classic";
+      $$("[data-theme-pick]", root).forEach((b) => {
+        const on = b.dataset.themePick === current;
+        b.classList.toggle("on", on);
+        b.setAttribute("aria-pressed", String(on));
+      });
+    };
+    $$("[data-theme-pick]", root).forEach((b) => b.addEventListener("click", () => {
+      const key = window.kaamTheme?.set(b.dataset.themePick);
+      paintTheme();
+      if (key) toast(`Theme: ${themeOptions.find((t) => t.key === key)?.name || key}.`, "ok", 2200);
+    }));
+    window.addEventListener("kaamThemeChange", paintTheme);
+    paintTheme();
     $(".reset", root).addEventListener("click", () => {
       Object.assign(values, original);
       $$(".setGroups [data-key]", root).forEach((input) => { input.value = original[input.dataset.key]; });

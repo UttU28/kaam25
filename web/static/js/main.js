@@ -124,8 +124,23 @@ function openPalette() {
 }
 
 // ---------- boot ----------
+// On a narrow card, header buttons show only their icon - give each its name as a tooltip
+// (and for screen readers) unless it already has one.
+function nameIconButtons(root) {
+  root.querySelectorAll?.(".cardHead .btn:not([title]), .cardHead .btn:not([aria-label])").forEach((button) => {
+    const name = button.textContent.trim().replace(/\s+/g, " ");
+    if (!name) return;
+    if (!button.title) button.title = name;
+    if (!button.getAttribute("aria-label")) button.setAttribute("aria-label", name);
+  });
+}
+new MutationObserver((changes) => {
+  for (const change of changes) change.addedNodes.forEach((node) => { if (node.nodeType === 1) nameIconButtons(node.parentElement || node); });
+}).observe(document.body, { childList: true, subtree: true });
+
 async function boot() {
   hydrateIcons();
+  nameIconButtons(document);
   $("#menuBtn").innerHTML = icon("menu");
   $("#menuBtn").addEventListener("click", () => $("#sidebar").classList.toggle("open"));
   // Narrow window: the menu slides over the page; a tap outside it (or Esc) closes it.

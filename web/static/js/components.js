@@ -354,19 +354,24 @@ export function statusBadge(status) {
   const cls = { PASSED: "bGreen", SKIPPED: "bAmber", FAILED: "bRed" }[status];
   return status ? `<span class="badge ${cls || "bGrey"}">${esc(status)}</span>` : "";
 }
-export function typeBadge(startType) {
-  if (startType === "cloud") return `<span class="badge bBlue">${icon("cloud", "sm")}Cloud</span>`;
-  if (startType === "local") return `<span class="badge bPurple">${icon("laptop", "sm")}Local</span>`;
-  if (startType === "manual") return `<span class="badge bGrey">${icon("check", "sm")}Done by hand</span>`;
+// A badge: icon + word, or (iconOnly, for tight lists) just the icon with the word on hover.
+const badge = (cls, iconName, text, iconOnly) => (iconOnly
+  ? `<span class="badge ${cls} iconOnly" title="${text}" aria-label="${text}">${icon(iconName, "sm")}</span>`
+  : `<span class="badge ${cls}">${iconName ? icon(iconName, "sm") : ""}${text}</span>`);
+export function typeBadge(startType, iconOnly = false) {
+  if (startType === "cloud") return badge("bBlue", "cloud", "Cloud", iconOnly);
+  if (startType === "local") return badge("bPurple", "laptop", "Local", iconOnly);
+  if (startType === "manual") return badge("bGrey", "check", "Done by hand", iconOnly);
   return "";
 }
 export const waDot = (record) =>
-  `<span class="waDot ${record?.whatsappSentAt ? "sent" : ""}" title="${record?.whatsappSentAt ? "Shared on WhatsApp" : "Not shared on WhatsApp yet"}">W</span>`;
-export function progressBadge(r) {
-  return {
-    closed: `<span class="badge bGreen">${icon("lock", "sm")}Closed</span>`,
-    completed: `<span class="badge bGreen">${icon("check", "sm")}Completed</span>`,
-    inProgress: `<span class="badge bAmber">${icon("clock", "sm")}In progress</span>`,
-    notStarted: `<span class="badge bBlue">Not started</span>`,
-  }[r.progress] || "";
+  `<span class="waDot ${record?.whatsappSentAt ? "sent" : ""}" title="${record?.whatsappSentAt ? "Shared on WhatsApp" : "Not shared on WhatsApp yet"}">${icon("whatsapp", "sm")}</span>`;
+export function progressBadge(r, iconOnly = false) {
+  const kind = {
+    closed: ["bGreen", "lock", "Closed"],
+    completed: ["bGreen", "check", "Completed"],
+    inProgress: ["bAmber", "clock", "In progress"],
+    notStarted: ["bBlue", iconOnly ? "play" : "", "Not started"],
+  }[r.progress];
+  return kind ? badge(...kind, iconOnly) : "";
 }
