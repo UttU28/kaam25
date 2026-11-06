@@ -316,6 +316,42 @@ export function switchEl(labelFor, checked, onChange, color) {
 }
 
 // ---------- job panel ----------
+// The WOs a bulk run (End Tickets / Close Tickets) stopped on: the step and why, each with Redo,
+// and Redo all. items: [{wo, step, error}]. Nothing here is marked done - Redo runs them again.
+export function redoBox({ what, onRedo, onLater }) {
+  const el = h(`<div class="redoBox hidden"></div>`);
+  let items = [], off = false;
+  function paint() {
+    el.classList.toggle("hidden", !items.length);
+    if (!items.length) { el.innerHTML = ""; return; }
+    el.innerHTML = `
+      <div class="redoHead">${icon("alert", "sm")}<div><b>${items.length} need${items.length === 1 ? "s" : ""} redo</b>
+        <small>Stopped with a problem - not marked ${esc(what)}${what === "ended" ? " and not shared" : ""}. Fix it, then Redo.</small></div>
+        ${items.length > 1 ? `<button class="btn btnAmber sm redoAll" ${off ? "disabled" : ""}>${icon("refresh", "sm")}<span>Redo all ${items.length}</span></button>` : ""}</div>
+      ${items.map((p) => `<div class="redoRow">
+        <div class="redoText"><div class="mono redoWo">${esc(p.wo)}</div>
+          <div class="note">Stopped at <b>${esc(p.step || "?")}</b>: ${esc(p.error || "")}</div></div>
+        <div class="redoBtns">
+          ${onLater ? `<button class="btn btnGhost sm redoLater" data-wo="${esc(p.wo)}" ${off ? "disabled" : ""} title="Take it off this list - Records shows it, with a button to pick it up later">${icon("clock", "sm")}<span>Do later</span></button>` : ""}
+          <button class="btn btnGhost sm redoOne" data-wo="${esc(p.wo)}" ${off ? "disabled" : ""}>${icon("refresh", "sm")}<span>Redo</span></button>
+        </div>
+      </div>`).join("")}`;
+  }
+  el.addEventListener("click", (e) => {
+    if (off) return;
+    if (e.target.closest(".redoAll")) onRedo(items.map((p) => p.wo));
+    const one = e.target.closest(".redoOne");
+    if (one) onRedo([one.dataset.wo]);
+    const later = e.target.closest(".redoLater");
+    if (later && onLater) onLater(later.dataset.wo);
+  });
+  return {
+    el,
+    set(list) { items = list || []; paint(); },
+    disable(on) { off = !!on; paint(); },
+  };
+}
+
 export function jobPanel() {
   const el = h(`<div class="job hidden">
       <div class="jobHead"><span class="spinner"></span><span class="jTitle"></span><span class="spacer"></span>

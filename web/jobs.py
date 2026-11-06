@@ -85,6 +85,11 @@ def getJob(jobId):
         return jobs.get(jobId)
 
 
+def runningJobs(kind):
+    with jobsLock:
+        return [job for job in jobs.values() if job.state == "running" and job.kind == kind]
+
+
 def listJobs():
     with jobsLock:
         recent = sorted(jobs.values(), key=lambda j: j.startedAt, reverse=True)[:12]

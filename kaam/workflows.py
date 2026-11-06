@@ -315,10 +315,51 @@ def checkPlanInTems(wos, progress=lambda text: None):
             "summary": " · ".join(parts) + "."}
 
 
+# ---------- a WO's problem (End / Close): where it stopped, shown until a rerun gets through ----------
+def noteProblem(wo, kind, step, error):
+    """kind "end" / "close": saved as endProblem / closeProblem {step, error, at} on the WO."""
+    text = str(error).strip().splitlines()[-1] if str(error).strip() else "stopped"
+    safeSave(wo, event=f"{'End' if kind == 'end' else 'Close'}: stopped at {step} - {text}",
+             **{f"{kind}Problem": {"step": step, "error": text[:400], "at": now()}})
+    return {"wo": wo, "step": step, "error": text[:400]}
+
+
+def clearProblem(wo, kind):
+    record = getRecord(wo) or {}
+    if record.get(f"{kind}Problem") or record.get(f"{kind}Later"):
+        safeSave(wo, **{f"{kind}Problem": {}, f"{kind}Later": ""})
+
+
+def setLater(wo, kind, later=True):
+    """Needs redo -> Do later: off the redo box, the ready list and the bulk runs; Records shows it
+    (End later / Close later) with End now / Close now to pick it up again. later=False: back."""
+    if kind not in ("end", "close"):
+        raise WorkflowError("Unknown kind.")
+    record = getRecord(cleanWorkOrder(wo))
+    if not record:
+        raise WorkflowError("Not in Records.")
+    word = "End" if kind == "end" else "Close"
+    error = safeSave(record["wo"], event=f"{word}: {'put off - do later' if later else 'picked up again'}",
+                     **{f"{kind}Later": now() if later else ""})
+    if error:
+        raise WorkflowError(error)
+    return getRecord(record["wo"])
+
+
+def problemOf(wo, kind, fallbackStep, error, since=""):
+    """The problem the step itself saved on the WO since `since` (this WO's start), or else this one."""
+    saved = (getRecord(wo) or {}).get(f"{kind}Problem") or {}
+    if saved.get("step") and since and saved.get("at", "") >= since:
+        return {"wo": wo, "step": saved["step"], "error": saved.get("error") or str(error)}
+    return noteProblem(wo, kind, fallbackStep, error)
+
+
 # ---------- End ----------
-def endTicket(wo, post=lambda kind, value: None):
+def endTicket(wo, post=lambda kind, value: None, markEnded=True):
     """Find + verify the ticket ID (cloud) or skip that (local), copy GridSummary, upload EQ3/EQ6.
-    post(kind, value): "ticket", "progress", "gridFile", "jobIds". Returns {"ok", "summary"}."""
+    post(kind, value): "ticket", "progress", "gridFile", "jobIds". Returns {"ok", "summary"}.
+    "ok" only when every step worked; only then is it marked ended (markEnded=False: End Tickets
+    marks it after the WhatsApp share too). A problem is saved on the WO (endProblem)."""
     wo = cleanWorkOrder(wo)
     if not wo:
         raise WorkflowError("Enter a WO first.")
@@ -332,14 +373,17 @@ def endTicket(wo, post=lambda kind, value: None):
         post("progress", "Searching TechInsights in your Chrome…")
         try:
             ticketId = lookupTicketId(wo, expectedId=startId)
-        except Exception:
+        except Exception as error:
             if startId:
                 safeSave(wo, event=f"End: Ticket {startId} not found in TechInsights - stopped")
+            noteProblem(wo, "end", "Ticket ID", error)
             raise
         if startId and startId != ticketId:
             safeSave(wo, event=f"End: ticket ID mismatch (Start {startId}, TechInsights {ticketId}) - stopped")
-            raise WorkflowError(f"Ticket ID check failed: Start Ticket saved {startId}, but TechInsights shows "
-                                f"{ticketId} for this WO. Stopped before uploading - check which one is right.")
+            problem = (f"Ticket ID check failed: Start Ticket saved {startId}, but TechInsights shows "
+                       f"{ticketId} for this WO. Stopped before uploading - check which one is right.")
+            noteProblem(wo, "end", "Ticket ID", problem)
+            raise WorkflowError(problem)
         check = (f"Ticket ID {ticketId} matches Start Ticket ✓" if startId
                  else f"Found Ticket ID {ticketId} (no Start Ticket record to check against)")
         verified = bool(startId)
@@ -378,87 +422,100 @@ def endTicket(wo, post=lambda kind, value: None):
             wo, onProgress=lambda text: post("progress", f"{check}. {text}"),
             onResult=onResult, onTab=onTab, alreadyDone=alreadyDone)
     except Exception as error:
+        noteProblem(wo, "end", "ActixOne", error)
         raise WorkflowError("\n".join(summaries + errors + [f"ActixOne: {error}"]))
     post("jobIds", jobIds)
-    allUploaded = not uploadErrors and all(jobIds.get(equipment) for equipment in equipments)
-    safeSave(wo, event=f"End: uploads {'done' if allUploaded else 'with problems - rerun to finish'}",
-             uploadNotes=uploadSummaries + uploadErrors, **({"endedAt": now()} if allUploaded else {}))
+    missingIds = [f"{equipment}: no Job ID" for equipment in equipments if not jobIds.get(equipment)]
+    problems = errors + uploadErrors + ([] if uploadErrors else missingIds)
+    allDone = not problems
+    safeSave(wo, event=f"End: uploads {'done' if allDone else 'with problems - rerun to finish'}",
+             uploadNotes=uploadSummaries + uploadErrors, **({"endedAt": now()} if allDone and markEnded else {}))
+    if allDone:
+        clearProblem(wo, "end")
+    else:  # the first step that failed: GridSummary, EQ3 or EQ6 (each upload error starts with its name)
+        first = problems[0]
+        step = "GridSummary" if first.startswith("GridSummary") else first.split(":")[0] if ":" in first else "Uploads"
+        noteProblem(wo, "end", step, first.split(":", 1)[-1].strip() if ":" in first else first)
     report = "\n".join(summaries + uploadSummaries + errors + uploadErrors)
-    return {"ok": not (errors or uploadErrors), "summary": report, "ticketId": ticketId, "jobIds": jobIds}
+    return {"ok": allDone, "summary": report, "ticketId": ticketId, "jobIds": jobIds}
 
 
 def endAll(wos, post=lambda kind, value: None, send=None):
     """End Tickets: End each WO in turn (ticket check, GridSummary, EQ uploads - as End Ticket's
-    button), then share on WhatsApp one by one - only the WOs whose End finished completely and that
-    weren't shared yet (each share first looks in the chat, so nothing goes out twice).
-    Returns {"ok", "summary", "ended", "shared", "failed"}."""
+    button), then share on WhatsApp the ones whose uploads all worked. A WO with a problem at any
+    step is never shared, keeps its problem (endProblem: which step, why) and is NOT marked ended -
+    it stays on End's list for Redo. Marked ended only once every step worked, the share included.
+    Returns {"ok", "summary", "ended", "shared", "problems": [{wo, step, error}]}."""
     from .chromeBridge import StoppedError
+    from .config import whatsappSend
+    send = whatsappSend if send is None else send
     progress = lambda text: post("progress", text)
-    ended, failed, shared, notShared = [], [], [], []
+    uploaded, problems, shared = [], {}, []
     for number, wo in enumerate(wos, 1):
         tag = f"[{number}/{len(wos)}] {wo}"
+        since = now()
         progress(f"{tag}: ending…")
         post("current", wo)
         try:
-            result = endTicket(wo, post=lambda kind, value, tag=tag: post(kind, f"{tag}: {value}") if kind == "progress" else None)
+            result = endTicket(wo, markEnded=False,
+                               post=lambda kind, value, tag=tag: post(kind, f"{tag}: {value}") if kind == "progress" else None)
         except StoppedError:
             raise
         except Exception as error:
-            failed.append(f"{wo}: {error}")
-            progress(f"{tag}: problem - {error}")
+            problems[wo] = problemOf(wo, "end", "End", error, since)
+            progress(f"{tag}: stopped at {problems[wo]['step']} - {problems[wo]['error']} (not shared)")
             continue
         record = getRecord(wo) or {}
         try:  # the report with the Ticket ID and EQ Job IDs, as End Ticket saves it after a run
             saveReportFields(reportFieldsFromRecord(record), event=None)
         except Exception:
             pass
-        if result.get("ok") and record.get("endedAt"):
-            ended.append(wo)
+        if result.get("ok"):
+            uploaded.append(wo)
             progress(f"{tag}: uploads done")
         else:
-            failed.append(f"{wo}: {result.get('summary', 'finished with problems').splitlines()[-1]}")
-            progress(f"{tag}: finished with problems - not shared")
-        post("ended", list(ended))
+            problems[wo] = problemOf(wo, "end", "Uploads", result.get("summary", "finished with problems"), since)
+            progress(f"{tag}: stopped at {problems[wo]['step']} - {problems[wo]['error']} (not shared)")
+        post("uploaded", list(uploaded))
 
-    toShare = []
-    for wo in ended:
-        record = getRecord(wo) or {}
-        missing = [name for name, value in (("Ticket ID", record.get("ticketId")), ("GridSummary file", record.get("gridSummaryPath")),
-                                            *((equipment, record.get(equipment.lower())) for equipment in equipments)) if not value]
-        if record.get("whatsappSentAt"):
-            notShared.append(f"{wo}: shared before")
-        elif missing:
-            notShared.append(f"{wo}: missing {', '.join(missing)}")
-        else:
-            toShare.append(wo)
-    for number, wo in enumerate(toShare, 1):
-        tag = f"WhatsApp [{number}/{len(toShare)}] {wo}"
-        progress(f"{tag}: sharing…")
-        post("current", wo)
-        try:
-            outcome = shareTicket(wo, reportFromRecord(getRecord(wo) or {}), send=send, checkFirst=True, woDone=False)
-            shared.append(wo)
-            progress(f"{tag}: {outcome['summary']}")
-        except StoppedError:
-            raise
-        except Exception as error:
-            notShared.append(f"{wo}: {error}")
-            progress(f"{tag}: problem - {error}")
-        post("shared", list(shared))
+    # WhatsApp: only the WOs whose every upload worked, and not shared before.
+    toShare = [wo for wo in uploaded if not (getRecord(wo) or {}).get("whatsappSentAt")]
+    if toShare and send:
+        # All in one WhatsApp run (the chat opened once, the WOs back to back) - much faster.
+        progress(f"WhatsApp: sharing {len(toShare)} WO{'s' if len(toShare) != 1 else ''} in one go…")
+        for wo, result in shareTickets(toShare, progress=progress, post=post).items():
+            if result.get("ok"):
+                shared.append(wo)
+            else:
+                problems[wo] = noteProblem(wo, "end", "WhatsApp", result.get("error") or "not sent")
+    else:
+        for number, wo in enumerate(toShare, 1):  # Send OFF: each one typed for you to send
+            tag = f"WhatsApp [{number}/{len(toShare)}] {wo}"
+            progress(f"{tag}: sharing…")
+            post("current", wo)
+            try:
+                outcome = shareTicket(wo, reportFromRecord(getRecord(wo) or {}), send=send, checkFirst=True, woDone=False)
+                shared.append(wo)
+                progress(f"{tag}: {outcome['summary']}")
+            except StoppedError:
+                raise
+            except Exception as error:
+                problems[wo] = noteProblem(wo, "end", "WhatsApp", error)
+                progress(f"{tag}: problem - {error}")
+            post("shared", list(shared))
 
     doneLine = ""
-    if shared:  # every summary is out: one "- Done" message with all of them in the WO group
-        doneLine = sendWoDone(shared, send=send, progress=progress)
+    sentNow = [wo for wo in shared if (getRecord(wo) or {}).get("whatsappSentAt")]
+    if sentNow:  # every summary is out: one "- Done" message with all of them in the WO group
+        doneLine = sendWoDone(sentNow, send=send, progress=progress)
         if doneLine:
             progress(doneLine)
 
-    # Like End Ticket's Done: each WO that's fully through (ended, and shared now or before) gets its
-    # ActixOne tabs closed. A WO with a problem keeps its tabs, so you can look at what happened.
-    closedTabs = 0
+    # Every step worked: ended now, its ActixOne tabs closed. A WO with a problem keeps its tabs
+    # (to look at what happened) and stays open for Redo.
+    ended, closedTabs = [wo for wo in uploaded if wo not in problems], 0
     for wo in ended:
         record = getRecord(wo) or {}
-        if not (wo in shared or record.get("whatsappSentAt")):
-            continue
         tokens = record.get("eqTabTokens") or []
         if tokens:
             try:
@@ -466,15 +523,18 @@ def endAll(wos, post=lambda kind, value: None, send=None):
                 closedTabs += len(tokens)
             except Exception:
                 pass  # the tabs just stay open; never fail the run for this
-        safeSave(wo, event="End Tickets: done", eqTabTokens=[])
+        safeSave(wo, event="End Tickets: every step done - ended", eqTabTokens=[],
+                 **({} if record.get("endedAt") else {"endedAt": now()}))
+        clearProblem(wo, "end")
+    post("ended", list(ended))
     if closedTabs:
         progress(f"Closed {closedTabs} ActixOne tab{'s' if closedTabs != 1 else ''}")
-    lines = [f"Ended {len(ended)} of {len(wos)}" + (f", shared {len(shared)} on WhatsApp." if toShare else ".")]
+    lines = [f"Ended {len(ended)} of {len(wos)}" + (f", shared {len(shared)} on WhatsApp" if shared else "") + "."]
     if doneLine:
         lines.append(doneLine)
-    lines += [f"Not ended - {line}" for line in failed] + [f"Not shared - {line}" for line in notShared]
-    return {"ok": not failed and len(shared) == len(toShare), "summary": "\n".join(lines),
-            "ended": ended, "shared": shared, "failed": failed}
+    lines += [f"Needs redo - {p['wo']}: stopped at {p['step']} - {p['error']}" for p in problems.values()]
+    return {"ok": not problems, "summary": "\n".join(lines), "ended": ended, "shared": shared,
+            "problems": list(problems.values())}
 
 
 def saveReportFields(fields, event=None, **extra):
@@ -585,6 +645,47 @@ def sendWoDone(wos, send=None, progress=lambda text: None, onlyNew=True):
     return summary
 
 
+def shareTickets(wos, group=None, progress=lambda text: None, post=lambda kind, value: None, save=True, checkFirst=True):
+    """Several WOs on WhatsApp in one run (Send pressed): each one's renamed CSV with its report as
+    the caption, then its TEMS picture - the chat opened once, the WOs back to back. A WO already in
+    the chat isn't sent again. Each WO is saved as shared the moment it's out (save=False: nothing
+    saved, e.g. a test to another group). Returns {wo: result}."""
+    from .config import whatsappGroup
+    from .pictures import pictureOf
+    from .whatsappShare import shareManyOnWhatsApp
+    group = group or whatsappGroup
+    items, results, sharedNow = [], {}, []
+    for wo in wos:
+        record = getRecord(wo) or {}
+        picture = pictureOf(record)
+        if not picture:
+            results[wo] = {"wo": wo, "ok": False, "error": "no TEMS picture yet - add it on End Ticket first"}
+            continue
+        items.append({"wo": wo, "caption": whatsappCaption(wo, reportFromRecord(record)),
+                      "csvPath": record.get("gridSummaryPath"), "picturePath": picture})
+
+    def onResult(result):
+        wo = result.get("wo")
+        if result.get("ok"):
+            took = f" ({result['seconds']}s)" if result.get("seconds") else ""
+            progress(f"WhatsApp {wo}: {result.get('summary') or 'sent'}{took}")
+            if save and wo not in sharedNow:
+                sharedNow.append(wo)
+                safeSave(wo, event=f"WhatsApp: sent to {group}" + (" (already in the chat)" if result.get("alreadySent") else ""),
+                         whatsappSentAt=now(), whatsappGroup=group)
+                post("shared", list(sharedNow))
+        else:
+            progress(f"WhatsApp {wo}: problem - {result.get('error')}")
+
+    if items:
+        results.update(shareManyOnWhatsApp(items, group=group, onResult=onResult, checkFirst=checkFirst))
+    if save:
+        for wo, result in results.items():
+            if not result.get("ok"):
+                safeSave(wo, event=f"WhatsApp: failed - {result.get('error')}")
+    return results
+
+
 def shareTicket(wo, report, send=None, csvPath=None, progress=lambda text: None, checkFirst=False, woDone=True):
     """Share the renamed CSV + the TEMS picture + the report (Ticket ID blank for a local start) on
     WhatsApp (the picture as a photo after the CSV), then (woDone) "<WO> - Done" in the WO group. The picture is required."""
@@ -640,8 +741,8 @@ def closeState(record):
     status = (record.get("status") or "").upper()
     isLocal = isLocalStart(record)
     canClose = bool(record) and status in closableStatuses and not isLocal
-    if record.get("closedAt"):
-        canClose = False  # done (by the close steps, or marked closed by hand)
+    if record.get("closedAt") or not record.get("endedAt"):
+        canClose = False  # done (by the close steps, or marked closed by hand) / End not finished yet
     if not record:
         reason = "Not in Records - run Start / End Ticket for it first."
     elif record.get("closedAt"):
@@ -651,6 +752,10 @@ def closeState(record):
                   "Only the day's cloud ticket gets closed.")
     elif status not in closableStatuses:
         reason = f"Set the status (PASSED, SKIPPED or FAILED) on End Ticket first - it's {status or 'not set'}."
+    elif not record.get("endedAt"):
+        stuck = record.get("endProblem") or {}
+        reason = ("End Ticket isn't finished" + (f" - it stopped at {stuck['step']}: {stuck.get('error', '')}" if stuck.get("step") else "")
+                  + ". Finish (or Redo) it on End Ticket first - a ticket is closed only after every End step.")
     else:
         reason = "Ready. Close TKT runs the steps in TechInsights."
     steps = [{"field": field, "name": name, "what": what, "doneAt": record.get(field)}
@@ -659,9 +764,11 @@ def closeState(record):
 
 
 def isReadyToClose(record):
-    """Cloud tickets with a result (PASSED / SKIPPED / FAILED), not closed yet. Local starts never
-    show (they have no ticket)."""
+    """Cloud tickets with a result (PASSED / SKIPPED / FAILED), ended (every End step done), not
+    closed yet. Local starts never show (they have no ticket)."""
     return ((record.get("status") or "").upper() in closableStatuses and not isLocalStart(record)
+            and bool(record.get("endedAt"))  # End finished (every step) first
+            and not record.get("closeLater")  # put off with Do later: Records has it
             and not record.get("closedAt") and not all(record.get(field) for field, _, _ in closeSteps))
 
 
@@ -683,10 +790,11 @@ def closeTicket(wo, progress=lambda text: None):
     logfile = {"eq3": record.get("eq3"), "eq6": record.get("eq6"), "total": record.get("totalGrids"),
                "csvPath": csvPath}
     logfile["tested"], logfile["skipped"] = gridsForStatus(record.get("status"), record.get("attempted"), record.get("skipped"))
+    firstOpen = next((name for field, name, _ in closeSteps if not record.get(field)), "Close")
     try:
         summary, stepsDone, alreadyDone, error = closeTicketSteps(wo, ticketId, logfile)
     except Exception as error:
-        safeSave(wo, event=f"Close: stopped - {error}")
+        noteProblem(wo, "close", firstOpen, error)
         raise
     saved = getRecord(wo) or {}
     for step in alreadyDone:
@@ -697,11 +805,44 @@ def closeTicket(wo, progress=lambda text: None):
         field, what = stepNames.get(step, (f"closeStep{step}At", f"step {step}"))
         safeSave(wo, event=f"Close: Step {step} done - {what}", **{field: now()})
     saved = getRecord(wo) or {}
-    if all(saved.get(field) for field, _, _ in closeSteps) and not saved.get("closedAt"):
+    allDone = all(saved.get(field) for field, _, _ in closeSteps)
+    if allDone and not error and not saved.get("closedAt"):  # closed only once every step is done
         safeSave(wo, event="Ticket closed - all close steps done", closedAt=now())
         summary = (summary or "Done.") + " 🔒 Ticket marked as Closed."
-    if error:
-        message = error + (f" (step {', '.join(map(str, stepsDone))} done and saved)" if stepsDone else "")
-        safeSave(wo, event=f"Close: stopped - {message}")
+    if error or not allDone:
+        message = (error or summary or "not every close step got done") + (f" (step {', '.join(map(str, stepsDone))} done and saved)" if stepsDone else "")
+        stuckAt = next((name for field, name, _ in closeSteps if not saved.get(field)), firstOpen)
+        noteProblem(wo, "close", stuckAt, message)
         raise WorkflowError(message)
+    clearProblem(wo, "close")
     return summary
+
+
+def closeAll(wos, post=lambda kind, value: None):
+    """Close Tickets: the close steps for each WO in turn. One that fails keeps its problem
+    (closeProblem: which step, why) and is not marked closed; the run goes on with the next one.
+    Returns {"ok", "summary", "closed", "problems": [{wo, step, error}]}."""
+    from .chromeBridge import StoppedError
+    progress = lambda text: post("progress", text)
+    closed, problems = [], []
+    for number, wo in enumerate(wos, 1):
+        tag = f"[{number}/{len(wos)}] {wo}"
+        since = now()
+        progress(f"{tag}: closing…")
+        post("current", wo)
+        try:
+            closeTicket(wo, progress=lambda text, tag=tag: progress(f"{tag}: {text}"))
+            if (getRecord(wo) or {}).get("closedAt"):
+                closed.append(wo)
+                progress(f"{tag}: closed 🔒")
+            else:
+                problems.append(problemOf(wo, "close", "Close", "not every close step got done", since))
+        except StoppedError:
+            raise
+        except Exception as error:
+            problems.append(problemOf(wo, "close", "Close", error, since))
+            progress(f"{tag}: stopped at {problems[-1]['step']} - {problems[-1]['error']} - going on with the next one")
+        post("closed", list(closed))
+    lines = [f"Closed {len(closed)} of {len(wos)}."]
+    lines += [f"Needs redo - {p['wo']}: stopped at {p['step']} - {p['error']}" for p in problems]
+    return {"ok": not problems, "summary": "\n".join(lines), "closed": closed, "problems": problems}

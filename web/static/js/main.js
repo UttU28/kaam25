@@ -10,8 +10,9 @@ import settings from "./pages/settings.js";
 import maps from "./pages/maps.js";
 import sheets from "./pages/sheets.js";
 import live from "./pages/live.js";
+import connection from "./pages/connection.js";
 
-const pages = { today, maps, sheets, live, start, end, close, records, settings };
+const pages = { today, maps, sheets, live, start, end, close, records, connection, settings };
 const navItems = [
   ["Work", null],
   ["today", "Today", "today", "var(--accent)"],
@@ -23,6 +24,7 @@ const navItems = [
   ["sheets", "Sheets", "sheet", "var(--accent)"],
   ["Library", null],
   ["records", "Records", "records", "var(--purple)"],
+  ["connection", "Connection", "wifi", "var(--accent)"],
   ["settings", "Settings", "settings", "var(--muted)"],
 ];
 

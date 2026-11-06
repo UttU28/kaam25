@@ -5,7 +5,7 @@ import { jobPanel, locationTarget, progressBadge, seg, shareLocation, statusBadg
 
 const filters = [
   ["all", "All"], ["today", "Today"], ["inProgress", "In progress"], ["completed", "Completed"], ["notStarted", "Not started"],
-  ["cloud", "Cloud"], ["local", "Local"], ["wa", "WhatsApp pending"], ["close", "Ready to close"],
+  ["cloud", "Cloud"], ["local", "Local"], ["wa", "WhatsApp pending"], ["close", "Ready to close"], ["later", "Do later"],
 ];
 const matches = {
   all: () => true,
@@ -17,9 +17,13 @@ const matches = {
   local: (r) => r.startType === "local",
   wa: (r) => (r.progress === "completed" || r.progress === "closed") && !r.whatsappSentAt,
   close: (r) => r.readyToClose,
+  later: (r) => Boolean(r.endLater || r.closeLater),
 };
 const openFolds = new Set();  // "report" / "history": closed until you open them
 const keyOf = (wo) => String(wo || "").replace(/\s+/g, "").toUpperCase();
+// Put off from Needs redo with Do later: End later / Close later (End now / Close now picks it up).
+const laterBadge = (r, full = false) => [["endLater", "End later", "endProblem"], ["closeLater", "Close later", "closeProblem"]]
+  .filter(([key]) => r[key]).map(([, label, problem]) => `<span class="badge bAmber" title="${esc(r[problem]?.step ? `Stopped at ${r[problem].step}: ${r[problem].error || ""}` : "Put off for later")}">${icon("clock", "sm")}${full ? label : label.split(" ")[0]}</span>`).join("");
 const callout = (text, kind) => text ? `<div class="callout ${kind}">${icon(kind === "ok" ? "check" : kind === "info" ? "info" : "alert", "sm")}<div>${esc(text)}</div></div>` : "";
 
 export default {
@@ -126,7 +130,7 @@ export default {
             <div class="main">
               <div class="wo" title="${esc(r.wo)}">${esc(r.wo)}</div>
               <div class="sub">${esc(r.ticketId || "no ticket")}${r.gridKey ? ` · <span class="gridShort" title="Grid key ${esc(r.gridKey)}${r.gridCount > 1 ? ` (+${r.gridCount - 1} more)` : ""}">${esc(shortGridKey(r.gridKey))}${r.gridCount > 1 ? ` +${r.gridCount - 1}` : ""}</span>` : ""} · ${eq}</div>
-              <div class="tags">${typeBadge(r.startType, true)}${progressBadge(r, true)}</div>
+              <div class="tags">${typeBadge(r.startType, true)}${progressBadge(r, true)}${laterBadge(r)}</div>
             </div>
             <div class="side">${statusBadge(r.status) || ""}<span class="time">${time}</span>${r.startedAt && r.startType !== "manual" ? waDot(r) : ""}</div>
           </div>`;
@@ -261,13 +265,15 @@ export default {
             <span class="spacer"></span>
             <button class="btn btnDanger sm del" title="Delete this record">${icon("trash", "sm")}<span>Delete</span></button></div>
           <div class="dMeta">${esc(meta || "Not started yet")}</div>
-          <div class="dTags">${typeBadge(r.startType)}${progressBadge(r)}${statusBadge(r.status)}${verified}
+          <div class="dTags">${typeBadge(r.startType)}${progressBadge(r)}${statusBadge(r.status)}${verified}${laterBadge(r, true)}
             ${started && r.startType !== "manual" ? `${waDot(r)}<span class="note">${r.whatsappSentAt ? `shared ${esc(niceTime(r.whatsappSentAt))}` : "not shared yet"}</span>` : ""}</div>
           <div class="dActions">
             <button class="btn btnPrimary cpReport">${icon("copy", "sm")}<span>Copy ${started ? "report" : "preview"}</span></button>
             ${started ? `<button class="btn btnWa share">${icon("whatsapp", "sm")}<span>WhatsApp</span></button>` : ""}
             <button class="btn btnGhost open">${icon("folder", "sm")}<span>Open file</span></button>
             <span class="spacer"></span>
+            ${r.endLater ? `<button class="btn btnAmber laterNow" data-kind="end" title="Back on End's list - opens End Ticket with it">${icon("refresh", "sm")}<span>End now</span></button>` : ""}
+            ${r.closeLater ? `<button class="btn btnAmber laterNow" data-kind="close" title="Back on Ready to close - opens Close Ticket with it">${icon("lock", "sm")}<span>Close now</span></button>` : ""}
             ${started ? `<a class="btn btnGreen" href="#/end?wo=${encodeURIComponent(r.wo)}">End Ticket ${icon("arrow", "sm")}</a>`
               : `<a class="btn btnPrimary" href="#/start?wo=${encodeURIComponent(r.wo)}">${icon("rocket", "sm")}Start</a>`}
           </div>
@@ -333,6 +339,14 @@ export default {
         } catch (error) { dmsg(error.message, "bad"); }
         finally { button.disabled = false; }
       });
+      d.querySelectorAll(".laterNow").forEach((button) => button.addEventListener("click", async () => {
+        const kind = button.dataset.kind;
+        try {
+          await api(`/api/records/${enc(r.wo)}/later`, { body: { kind, later: false } });
+          refreshState();
+          location.hash = `#/${kind}?wo=${encodeURIComponent(r.wo)}`;
+        } catch (error) { toast(error.message, "bad"); }
+      }));
       $(".del", d).addEventListener("click", async () => {
         if (!await confirmBox("Delete record?", `Delete the record for\n<b>${esc(r.wo)}</b>?\n\nIts Ticket ID, EQ Job IDs, report and history will be removed from Records.`, "Delete", "btnDanger")) return;
         if (!await confirmBox("Are you sure?", `Really delete <b>${esc(r.wo)}</b>?\n\nA copy is kept in tickets.deleted.json, but it won't come back in the app by itself.`, "Yes, delete", "btnDanger")) return;

@@ -49,6 +49,78 @@ def sendTextOnWhatsApp(text, group, send=whatsappSend, retries=whatsappRetries, 
         time.sleep(retryPauseSeconds)
 
 
+def shareManyOnWhatsApp(items, group=whatsappGroup, retries=whatsappRetries, openUrl=openInChrome,
+                        startTimeout=40, onResult=None, checkFirst=True):
+    """End Tickets: several WOs in one WhatsApp run - the chat is opened once, then each WO's CSV
+    (report as caption) and TEMS picture go out back to back, and Send is pressed. A WO whose CSV is
+    already in the chat isn't sent again. items: [{wo, caption, csvPath, picturePath}].
+    onResult(result) is called as each WO finishes ({wo, ok, sent, summary / error, seconds}).
+    Returns {wo: result} for every item. A failed run is tried again for the WOs that didn't go.
+    checkFirst=False (a test to another group only): the first try sends even what's in the chat."""
+    results, prepared = {}, []
+
+    def note(result):
+        if result.get("wo") and result["wo"] not in results:
+            results[result["wo"]] = result
+            if onResult:
+                onResult(result)
+
+    for item in items:
+        try:
+            prepared.append({**item, "csvFile": findRenamedCopy(item["wo"], item.get("csvPath"))})
+        except Exception as error:
+            note({"wo": item["wo"], "ok": False, "sent": False, "error": str(error)})
+
+    attempts = 1 + retries
+    for attempt in range(1, attempts + 1):
+        # Not tried yet, or failed before anything went out (a WO whose CSV went is never resent).
+        remaining = [p for p in prepared if p["wo"] not in results]
+        if not remaining:
+            break
+
+        def buildUrl(requestId, remaining=remaining, attempt=attempt):
+            paths, batch = [], []
+            for p in remaining:
+                files = [p["csvFile"]] + ([p["picturePath"]] if p.get("picturePath") else [])
+                batch.append({"wo": p["wo"], "caption": p["caption"], "checkFirst": checkFirst or attempt > 1,
+                              "files": list(range(len(paths), len(paths) + len(files)))})
+                paths += files
+            registerFiles(requestId, paths, batch)
+            return f"http://127.0.0.1:{bridgePort}/whatsapp#" + urllib.parse.urlencode({
+                "kaamId": requestId, "kaamGroup": group, "kaamCaption": "", "kaamSend": "1",
+                "kaamAttempt": str(attempt), "kaamBatch": "1",
+            })
+
+        def onProgress(message):
+            for result in message.get("items") or []:
+                note(result)
+
+        error = ""
+        try:
+            message = runInChrome(buildUrl, openUrl=openUrl, startTimeout=startTimeout,
+                                  timeout=90 + 90 * len(remaining), onProgress=onProgress,
+                                  timeoutMessage="WhatsApp didn't finish in time. Check the WhatsApp tab.")
+            onProgress(message)
+            error = message.get("error") or ""
+        except ChromeBridgeError as bridgeError:
+            error = str(bridgeError)
+        # Failed before going out: may try again (dropped so the next try picks them up).
+        retryable = [wo for wo, r in results.items() if not r.get("ok") and not r.get("sent")
+                     and isRetryable(r.get("error") or "") and "stopped" not in (r.get("error") or "").lower()]
+        stop = (error and not isRetryable(error)) or attempt == attempts
+        if stop:
+            for p in remaining:
+                if p["wo"] not in results:
+                    note({"wo": p["wo"], "ok": False, "sent": False, "error": error or "WhatsApp didn't get to it."})
+            break
+        for wo in retryable:
+            results.pop(wo, None)
+        if not [p for p in prepared if p["wo"] not in results]:
+            break
+        time.sleep(retryPauseSeconds)
+    return results
+
+
 def shareOnWhatsApp(wo, caption, csvPath=None, group=whatsappGroup, send=whatsappSend,
                     retries=whatsappRetries, openUrl=openInChrome, startTimeout=40, timeout=5 * 60,
                     checkFirst=False, picturePath=None):

@@ -32,7 +32,7 @@ from kaam.ticketStore import (TicketStoreError, cloudStartToday, deleteNotStarte
                               openTicketsToday, renameWo, searchRecords, woKey)
 from kaam.workflows import WorkflowError  # noqa: E402
 
-from web.jobs import getJob, listJobs, startJob  # noqa: E402
+from web.jobs import getJob, listJobs, runningJobs, startJob  # noqa: E402
 
 staticDir = Path(__file__).resolve().parent / "static"
 bootedAt = datetime.now().isoformat(timespec="seconds") + f".{os.getpid()}"
@@ -107,6 +107,8 @@ def summary(record):
         "closedAt": record.get("closedAt"), "importedAt": record.get("importedAt"),
         "updatedAt": record.get("updatedAt"), "whatsappSentAt": record.get("whatsappSentAt"),
         "hasLocation": bool(lat and lon), "readyToClose": workflows.isReadyToClose(record),
+        "endProblem": record.get("endProblem") or None, "closeProblem": record.get("closeProblem") or None,
+        "endLater": record.get("endLater") or None, "closeLater": record.get("closeLater") or None,
     }
 
 
@@ -221,7 +223,8 @@ def readRouteOrders():
 
 def wosForDay(dayText, records=None):
     """A day's WOs, as the Maps and Sheets pages show them: {key: (record, category)}.
-    Driven that day (started or ended then): completed / doing. The rest of that day's list
+    Driven that day (started or ended then): completed / doing - completed also once Submit went
+    through in TEMS and you pressed Close on its pop-up (submittedAt), before End Ticket. The rest of that day's list
     (Records' day, plus Start's To start list today): pending today, missed on a past day."""
     todayText = datetime.now().date().isoformat()
     isToday = dayText == todayText
@@ -231,8 +234,10 @@ def wosForDay(dayText, records=None):
     for record in records:
         started = (record.get("startedAt") or "").startswith(dayText)
         ended = (record.get("endedAt") or "").startswith(dayText)
-        if started or ended:
-            picked[woKey(record.get("wo"))] = (record, "completed" if record.get("endedAt") else "doing")
+        submitted = (record.get("submittedAt") or "").startswith(dayText)
+        if started or ended or submitted:
+            done = record.get("endedAt") or record.get("submittedAt")
+            picked[woKey(record.get("wo"))] = (record, "completed" if done else "doing")
     for record in records:  # the day's list, as in Records (imported / moved / created that day)
         key = woKey(record.get("wo"))
         if (key not in picked and not record.get("startedAt") and record.get("temsCheck") != "missing"
@@ -511,7 +516,7 @@ def recordDetail(wo):
 @app.patch("/api/records/<path:wo>")
 def recordUpdate(wo):
     data = body()
-    source = "End" if data.get("source") == "End" else "Records"
+    source = data.get("source") if data.get("source") in ("End", "Live Testing") else "Records"
     record = workflows.updateStatus(wo, data.get("total", ""), data.get("attempted", ""), data.get("skipped", ""),
                                     data.get("status", ""), data.get("remarks", ""), source=source)
     return jsonify(detail(record))
@@ -621,6 +626,45 @@ def qrCode():
     return response
 
 
+@app.get("/api/connection")
+def connectionInfo():
+    """The Connection page: this PC's address on the WiFi it's connected to (the card its internet
+    goes out on) and the app's port, as the link others on the same WiFi open. Read fresh each
+    time, so a different WiFi shows its own address."""
+    port = request.environ.get("SERVER_PORT") or request.host.rpartition(":")[2] or "5000"
+    primary = ""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.connect(("10.255.255.255", 1))  # no packet is sent; just picks the outgoing card
+            primary = probe.getsockname()[0]
+    except OSError:
+        pass
+    if primary.startswith(("127.", "169.254.", "0.")):
+        primary = ""
+    others = [ip for ip in lanAddresses() if ip != primary]
+    # Windows Mobile hotspot (this laptop sharing its internet) always gives itself 192.168.137.1.
+    # Phone hotspots often keep their devices apart (each reaches only the phone), so a tablet on
+    # the laptop's own hotspot is the way round that.
+    hotspot = next((ip for ip in others if ip.startswith("192.168.137.")), "")
+    others = [ip for ip in others if ip != hotspot]
+    return jsonify({"lanAccess": config.lanAccess, "port": int(port), "ip": primary,
+                    "url": f"http://{primary}:{port}" if primary else "",
+                    "hotspot": {"ip": hotspot, "url": f"http://{hotspot}:{port}"} if hotspot else None,
+                    "others": [{"ip": ip, "url": f"http://{ip}:{port}"} for ip in others],
+                    "openedFrom": request.host})
+
+
+@app.post("/api/records/<path:wo>/later")
+def recordLater(wo):
+    """Needs redo -> Do later ({kind: end / close}), or back ({later: false}: End now / Close now)."""
+    data = body()
+    try:
+        record = workflows.setLater(wo, data.get("kind", ""), data.get("later", True) is not False)
+    except workflows.WorkflowError as error:
+        return fail(str(error))
+    return jsonify(detail(record))
+
+
 @app.post("/api/records/<path:wo>/location")
 def recordSendLocation(wo):
     return jsonify({"message": workflows.sendLocation(wo)})
@@ -631,6 +675,32 @@ def recordSendLocation(wo):
 def startWaiting():
     records, stops = inMapOrder(notStartedRecords())
     return jsonify([{**summary(r), "mapStop": n + 1 if n < stops else None} for n, r in enumerate(records)])
+
+
+@app.post("/api/start/order")
+def startOrderSave():
+    """Start's To start list dragged into a new order ({keys}): saved as today's order on Maps too
+    ("Your order · saved"), so Start, Maps and Sheets all follow it. Stops Maps had that aren't on
+    the list (e.g. not in TEMS yet) keep their place after these."""
+    import json
+    keys = [str(key) for key in (body().get("keys") or []) if key]
+    if not keys:
+        return fail("Nothing to order.")
+    today = datetime.now().date().isoformat()
+    with routeOrderLock:
+        orders, sequences = readRouteOrders(), readRouteSequences()
+        before = sequences.get(today) or orders.get(today) or []
+        order = keys + [key for key in before if key not in keys]
+        orders[today] = order
+        sequences[today] = order
+        orders = {d: orders[d] for d in sorted(orders, reverse=True)[:60]}
+        sequences = {d: sequences[d] for d in sorted(sequences, reverse=True)[:14]}
+        for path, value in ((routeOrderFile, orders), (routeSequenceFile, sequences)):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temp = path.with_suffix(".tmp")
+            temp.write_text(json.dumps(value, indent=1), encoding="utf-8")
+            os.replace(temp, path)
+    return jsonify({"ok": True, "order": order})
 
 
 @app.post("/api/start")
@@ -815,9 +885,15 @@ def endRun():
 @app.post("/api/end/runAll")
 def endRunAll():
     """End Tickets: every WO End Ticket lists (today's open ones whose result file is in), oldest
-    first - all uploads, then the WhatsApp shares one by one (only what ended and wasn't shared)."""
+    first - all uploads, then the WhatsApp shares (only what uploaded fully). {wos}: just those
+    (Redo: the ones that stopped with a problem)."""
     data = body()
     rows = sorted((r for r in openTicketsToday() if readyToEnd(r)), key=lambda r: r.get("startedAt") or "")
+    if data.get("wos"):
+        wanted = {woKey(wo) for wo in data["wos"]}
+        rows = [r for r in rows if woKey(r["wo"]) in wanted]
+    else:
+        rows = [r for r in rows if not r.get("endLater")]  # put off with Do later
     wos = [r["wo"] for r in rows]
     if not wos:
         return fail("Nothing to end - no open WO has its result file yet.")
@@ -858,6 +934,23 @@ def closeReady():
     return jsonify([summary(r) for r in searchRecords("") if workflows.isReadyToClose(r)])
 
 
+@app.post("/api/close/runAll")
+def closeRunAll():
+    """Close Tickets: every ready-to-close ticket, the one started first first ({wos}: just those -
+    Redo). One that fails keeps its problem and isn't marked closed; the run goes on with the next."""
+    data = body()
+    rows = sorted((r for r in searchRecords("") if workflows.isReadyToClose(r) and workflows.closeState(r)["canClose"]),
+                  key=lambda r: r.get("startedAt") or "")
+    if data.get("wos"):
+        wanted = {woKey(wo) for wo in data["wos"]}
+        rows = [r for r in rows if woKey(r["wo"]) in wanted]
+    wos = [r["wo"] for r in rows]
+    if not wos:
+        return fail("Nothing to close - no ticket is ready.")
+    job = startJob("closeAll", "", f"Close {len(wos)} tickets", lambda job: workflows.closeAll(wos, post=job.post))
+    return jsonify({"job": job.toJson(), "wos": wos})
+
+
 @app.post("/api/close/run")
 def closeRun():
     wo = workflows.cleanWorkOrder(body().get("wo", ""))
@@ -884,6 +977,56 @@ def whatsapp():
     return jsonify({"job": job.toJson()})
 
 
+@app.post("/api/whatsapp/many")
+def whatsappMany():
+    """Several WOs in one WhatsApp run ({wos, group?}), Send pressed: the chat opened once, then each
+    WO's CSV + report + picture back to back. Another group than the summary group = a test: sent
+    there, nothing saved on the WOs. The result has each WO's time and the total."""
+    data = body()
+    wos = [workflows.cleanWorkOrder(wo) for wo in data.get("wos") or []]
+    wos = [wo for wo in wos if wo]
+    if not wos:
+        return fail("No WOs to share.")
+    group = (data.get("group") or "").strip() or config.whatsappGroup
+    isTest = group != config.whatsappGroup
+
+    def work(job):
+        started = time.time()
+        # A test group may get the same WOs again (to time it); the real group never gets one twice.
+        results = workflows.shareTickets(wos, group=group, progress=job.progress, save=not isTest,
+                                         checkFirst=not (isTest and data.get("again")))
+        total = round(time.time() - started, 1)
+        sent = [r for r in results.values() if r.get("ok")]
+        perWo = round(total / len(sent), 1) if sent else None
+        lines = [f"{len(sent)} of {len(wos)} shared to \"{group}\" in {total}s"
+                 + (f" ({perWo}s per WO, opening WhatsApp and the chat included)" if perWo else "") + "."]
+        lines += [f"{wo}: {r['seconds']}s" for wo, r in results.items() if r.get("ok") and r.get("seconds")]
+        lines += [f"{wo}: {r.get('error')}" for wo, r in results.items() if not r.get("ok")]
+        return {"ok": len(sent) == len(wos), "summary": "\n".join(lines), "total": total, "perWo": perWo,
+                "items": list(results.values()), "test": isTest}
+    job = startJob("whatsapp", f"many:{group}", f"WhatsApp {group}: {len(wos)} WOs", work)
+    return jsonify({"job": job.toJson()})
+
+
+@app.post("/api/whatsapp/inspect")
+def whatsappInspect():
+    """Sends nothing: opens the group in WhatsApp Web and describes its last messages (markers, icons,
+    labels - no text), to keep the "already in the chat" check working when WhatsApp changes."""
+    import urllib.parse
+    from kaam.chromeBridge import bridgePort, runInChrome
+    data = body()
+    group = (data.get("group") or "").strip() or config.whatsappGroup
+    lookFor = (data.get("lookFor") or "").strip()
+
+    def work(job):
+        message = runInChrome(lambda requestId: f"http://127.0.0.1:{bridgePort}/whatsapp#" + urllib.parse.urlencode({
+            "kaamId": requestId, "kaamGroup": group, "kaamSend": "0", "kaamInspect": lookFor or "-"}), timeout=120)
+        return {"ok": bool(message.get("ok")), "summary": message.get("summary") or message.get("error") or "",
+                "inspect": message.get("inspect")}
+    job = startJob("whatsapp", f"inspect:{group}", f"WhatsApp {group}: inspect", work)
+    return jsonify({"job": job.toJson()})
+
+
 @app.post("/api/whatsapp/woDone")
 def whatsappWoDone():
     """Sheets' Coordinator Data: the whole list ("<WO> - Done" per line) in one message to the WO group."""
@@ -903,6 +1046,39 @@ def whatsappWoDone():
         return {"ok": True, "summary": summary}
     job = startJob("whatsappWo", "", f"WhatsApp {config.whatsappWoGroup}: {len(wos)} done", work)
     return jsonify({"job": job.toJson()})
+
+
+# A WO is "active" in TEMS (Control and Map show it) from Opening until it's closed: Opening, Opened,
+# Validating, Validated, Executing, Executed (results waiting), Pausing, Paused, Recovering.
+temsActiveStates = (1, 2, 5, 6, 7, 8, 9, 10, 12)
+
+
+def temsActiveCheck(wo):
+    """Which WO TEMS has active right now (its own data - what Control shows), and whether it's `wo`.
+    {reachable, active, openWo, state, stateName, same, otherWo (a different WO is active), closed
+    (TEMS's last word on `wo` is Closed)}. Read-only."""
+    from kaam import temsMap
+    try:
+        state = temsMap.workOrderState()
+    except Exception as error:
+        return {"reachable": False, "error": str(error)}
+    active = state["state"] in temsActiveStates and bool(state["wo"])
+    same = bool(wo and state["wo"] and sameWo(state["wo"], wo))
+    return {"reachable": True, "active": active, "openWo": state["wo"], "state": state["state"],
+            "stateName": state["stateName"], "same": same and active,
+            "otherWo": state["wo"] if active and wo and not same else "",
+            "closed": same and state["state"] == 4}
+
+
+@app.get("/api/tems/active")
+def temsActive():
+    """Start Ticket asks first: is a WO already active in TEMS, and is it this one?"""
+    return jsonify(temsActiveCheck(workflows.cleanWorkOrder(request.args.get("wo", ""))))
+
+
+def otherWoMessage(wo, check):
+    return (f"The WO you want, {wo}, isn't running in TEMS - {check['otherWo']} is ({check['stateName']}). "
+            f"Nothing pressed. Finish, suspend or close {check['otherWo']} in TEMS first, or pick it here.")
 
 
 @app.post("/api/tems")
@@ -984,12 +1160,38 @@ def temsPlay(wo=""):
             raise RuntimeError(f"TEMS isn't answering at {config.temsUrl} - is TEMS Paragon running? ({error})")
 
     def work(job):
+        check = temsActiveCheck(wo)
+        if check.get("otherWo"):  # TEMS has another WO active: the pop-up says so, nothing pressed
+            job.progress(f"TEMS: {check['otherWo']} is active ({check['stateName']}), not {wo}")
+            return {"ok": False, "otherWo": check["otherWo"], "otherState": check["stateName"], "wantedWo": wo,
+                    "error": otherWoMessage(wo, check)}
+        if check.get("same") and check.get("state") == 8:  # its run is over, results waiting
+            return {"ok": True, "summary": f"TEMS: {wo} has finished its run - Submit, Discard or Suspend it (nothing pressed)."}
+        runWo = temsRunWo(wo)
+        if runWo:  # a new run: Live Testing follows TEMS again for this WO
+            from kaam.ticketStore import now as stamp
+            if getRecord(runWo):
+                workflows.safeSave(runWo, temsRunStartedAt=stamp())
+            endedRuns.pop(woKey(runWo), None)
         phones = threading.Thread(target=reopenPhones, args=(job.progress,), daemon=True)
         phones.start()
         try:
             return startOnTems(job)
         finally:
             phones.join(60)
+
+    def waitReady(job, before, stopOnCloud=True):
+        """Up to ~2 min for Validated / Paused (or Executing: already running). Stops early when TEMS
+        says it isn't connected to TEMS Cloud - the play step logs in first then."""
+        for _ in range(80):  # Opening -> Opened -> Validating -> Validated
+            if before["state"] in temsMap.playable or before["state"] == temsMap.executing:
+                break
+            if stopOnCloud and temsMap.cloudOffline(before["error"]):
+                job.progress(f"TEMS says \"{before['error']}\" - logging in to TEMS Cloud before play")
+                break
+            time.sleep(1.5)
+            before = readState()
+        return before
 
     def startOnTems(job):
         before = readState()
@@ -1011,11 +1213,13 @@ def temsPlay(wo=""):
             job.progress(opened.get("summary") or "Opened")
         if before["state"] not in temsMap.playable:
             job.progress("Waiting for TEMS to have it ready (green)…")
-            for _ in range(80):  # up to ~2 min: Opening -> Opened -> Validating -> Validated
-                time.sleep(1.5)
-                before = readState()
-                if before["state"] in temsMap.playable or before["state"] == temsMap.executing:
-                    break
+            before = waitReady(job, before)
+            if temsMap.cloudOffline(before["error"]) and before["state"] not in temsMap.playable:
+                login = runTems("cloudLogin", timeout=5 * 60)
+                if not login.get("ok"):
+                    return {"ok": False, "error": f"TEMS isn't connected to TEMS Cloud and the login didn't work: {login.get('error')}"}
+                job.progress(login.get("summary") or "Logged in to TEMS Cloud")
+                before = waitReady(job, readState(), stopOnCloud=False)
             job.progress(f"TEMS: {before['wo'] or name} is {before['stateName']}")
             name = before["wo"] or name
             if before["state"] == temsMap.executing:
@@ -1025,6 +1229,21 @@ def temsPlay(wo=""):
         result = runTems("play", canPlay=canPlay)
         if not result.get("ok"):
             return result
+        if result.get("cloudLogin") and not result.get("played"):
+            # TEMS wasn't connected to Cloud: the extension logged in and went back to Control. Now
+            # wait for it to be ready again and press play once more.
+            job.progress(result.get("summary") or "Logged in to TEMS Cloud")
+            job.progress("Waiting for TEMS to have it ready (green) now that Cloud is logged in…")
+            before = waitReady(job, readState(), stopOnCloud=False)
+            name = before["wo"] or name
+            if before["state"] == temsMap.executing:
+                return {"ok": True, "summary": f"TEMS: {name} is already running - nothing pressed."}
+            canPlay = before["state"] in temsMap.playable
+            if canPlay:
+                job.progress("TEMS: pressing play on Control…")
+                result = runTems("play", canPlay=True)
+                if not result.get("ok"):
+                    return result
         if not canPlay:
             why = before["error"] or f"it's {before['stateName']}, play works once it's Validated (green)"
             return {"ok": False, "error": f"TEMS Control is open, but {name} can't start yet: {why}."}
@@ -1049,30 +1268,331 @@ def saveTemsPicture(wo, dataUrl):
     return path
 
 
+endWords = {"submit": "submitted", "discard": "discarded", "suspend": "suspended"}
+
+
+def temsRunWo(wo=""):
+    """The WO a TEMS run belongs to: the one picked on Live Testing, else the one TEMS has open."""
+    if wo:
+        return wo
+    from kaam import temsMap
+    try:
+        return temsMap.workOrderState().get("wo") or ""
+    except Exception:
+        return ""
+
+
+def markRunEnded(wo, action):
+    """This WO's TEMS run is over (Submit / Discard / Suspend went through): Live Testing stops
+    showing it as a running test - also the WO Submit reopens - until Start Stationary is pressed."""
+    if not wo:
+        return
+    from kaam.ticketStore import now as stamp
+    if getRecord(wo):
+        workflows.safeSave(wo, event=f"TEMS: test {endWords[action]}", temsRunEnd=action, temsRunEndedAt=stamp())
+    else:
+        endedRuns[woKey(wo)] = {"temsRunEnd": action, "temsRunEndedAt": stamp()}
+
+
+endedRuns = {}  # WOs not in Records: kept here (until the app restarts)
+
+
+def runEnded(wo):
+    """{"as": submit / discard / suspend, "at": iso} when this WO's last TEMS run was ended here
+    after its last Start Stationary, else None."""
+    if not wo:
+        return None
+    record = getRecord(wo) or endedRuns.get(woKey(wo)) or {}
+    ended, started = record.get("temsRunEndedAt"), record.get("temsRunStartedAt")
+    if ended and (not started or started < ended):
+        return {"as": record.get("temsRunEnd") or "", "at": ended}
+    return None
+
+
+# ---------- Submit's progress, step by step (Live Testing's pop-up shows it) ----------
+submitSteps = [("suspend", "Suspend in TEMS"), ("picture", "Picture of the WO"), ("reopen", "Opened again"),
+               ("play", "Play pressed"), ("results", "Results showing Submit / Discard / Suspend"),
+               ("submit", "Submit pressed in TEMS")]
+submitRuns = {}       # woKey -> the run (also saved on the record as temsSubmit, for a restart)
+lastSubmit = {"key": ""}
+
+
+class SubmitRun:
+    """One Submit: each step's state (working / done / failed), where it got stuck and why."""
+
+    def __init__(self, wo, jobId):
+        self.data = {"wo": wo, "jobId": jobId, "state": "running", "steps": {}, "failedAt": "", "error": "",
+                     "picture": "", "byHand": False, "closed": False,
+                     "startedAt": datetime.now().isoformat(timespec="seconds"), "endedAt": ""}
+        submitRuns[woKey(wo)] = self.data
+        lastSubmit["key"] = woKey(wo)
+        self.save()
+
+    def save(self):
+        wo = self.data["wo"]
+        if wo and getRecord(wo):
+            workflows.safeSave(wo, temsSubmit=dict(self.data))
+
+    def step(self, key, state, save=True):
+        self.data["steps"][key] = state
+        if save:
+            self.save()
+
+    def done(self, keys):
+        for key in keys:
+            self.step(key, "done", save=False)
+        self.save()
+
+    def fail(self, error, at=""):
+        """Stuck: at the first step not done yet (or `at`)."""
+        at = at or next((key for key, _ in submitSteps if self.data["steps"].get(key) != "done"), "")
+        if at:
+            self.data["steps"][at] = "failed"
+        for key, state in list(self.data["steps"].items()):
+            if state == "working" and key != at:
+                self.data["steps"][key] = ""
+        self.data.update(state="failed", failedAt=at, error=str(error),
+                         endedAt=datetime.now().isoformat(timespec="seconds"))
+        self.save()
+
+    def finish(self):
+        self.data.update(state="done", endedAt=datetime.now().isoformat(timespec="seconds"))
+        self.save()
+
+
+def submitRunFor(wo=""):
+    """The Submit run to show: this WO's, else the latest one - unless it was closed. A run the
+    app was in the middle of when it restarted shows as stuck."""
+    run = submitRuns.get(woKey(wo)) if wo else None
+    if not run and wo:
+        saved = (getRecord(wo) or {}).get("temsSubmit")
+        if saved:
+            run = dict(saved)
+            if run.get("state") == "running":
+                at = next((k for k, _ in submitSteps if (run.get("steps") or {}).get(k) != "done"), "")
+                run.update(state="failed", failedAt=at, error="The app restarted while it was submitting.")
+                run.setdefault("steps", {})[at] = "failed"
+            submitRuns[woKey(wo)] = run
+    if not run and lastSubmit["key"]:
+        run = submitRuns.get(lastSubmit["key"])
+    return run if run and not run.get("closed") else None
+
+
+def submitToResults(job, runWo, run):
+    """Submit's steps after the picture: wait until TEMS has the reopened WO ready, press play
+    (warnings get OK), then look on TEMS's Results page for Submit / Discard / Suspend (reloading
+    TEMS only when they're not there), up to ~10 minutes, and press Submit. Returns (ok, summary)."""
+    from kaam import temsMap
+    from kaam.chromeBridge import raiseIfStopped
+    def stuck(text):
+        run.fail(text)
+        return False, text
+    run.step("play", "working")
+    job.progress("TEMS: waiting for the WO to be ready (green) to press play…")
+
+    def waitReady(stopOnCloud=True):
+        state = {}
+        for _ in range(80):  # ~2 min: Opening -> Opened -> Validating -> Validated
+            raiseIfStopped()
+            try:
+                state = temsMap.workOrderState()
+            except Exception:
+                state = {}
+            if state.get("state") in temsMap.playable or state.get("state") == temsMap.executing:
+                break
+            if stopOnCloud and temsMap.cloudOffline(state.get("error")):
+                break
+            time.sleep(1.5)
+        return state
+    state = waitReady()
+    if temsMap.cloudOffline(state.get("error")) and state.get("state") not in temsMap.playable:
+        # TEMS isn't connected to TEMS Cloud: the play step logs in (Cloud tab), goes back to Control
+        # and then the WO gets ready - wait for that, then press play below.
+        job.progress(f"TEMS says \"{state.get('error')}\" - logging in to TEMS Cloud, then back to Control…")
+        login = runTems("cloudLogin", wo=runWo, timeout=5 * 60)
+        if not login.get("ok"):
+            return stuck(f"TEMS isn't connected to TEMS Cloud and the login didn't work: {login.get('error')}")
+        job.progress(login.get("summary") or "Logged in to TEMS Cloud")
+        state = waitReady(stopOnCloud=False)
+    if state.get("state") in temsMap.playable:
+        job.progress("TEMS: pressing play on Control…")
+        played = runTems("play", wo=runWo, canPlay=True, timeout=5 * 60)  # 5 min: a Cloud login may come first
+        if not played.get("ok"):
+            return stuck(f"Play didn't go through: {played.get('error')}")
+        job.progress(played.get("summary") or "Play pressed")
+        if played.get("cloudLogin") and not played.get("played"):  # logged in to Cloud, play wasn't ready yet
+            state = waitReady(stopOnCloud=False)
+            if state.get("state") in temsMap.playable:
+                played = runTems("play", wo=runWo, canPlay=True, timeout=5 * 60)
+                if not played.get("ok") or not played.get("played"):
+                    return stuck(f"Logged in to TEMS Cloud, but play didn't go through: {played.get('error') or played.get('summary')}")
+                job.progress(played.get("summary") or "Play pressed")
+            elif state.get("state") != temsMap.executing:
+                return stuck(f"Logged in to TEMS Cloud, but TEMS never had the WO ready to play ({state.get('stateName') or 'no answer'}"
+                             + (f": {state.get('error')}" if state.get("error") else "") + ").")
+    elif state.get("state") == temsMap.executing:
+        job.progress("TEMS: already running - no play needed.")
+    else:
+        return stuck(f"TEMS never had the WO ready to play ({state.get('stateName') or 'no answer'}"
+                     + (f": {state.get('error')}" if state.get("error") else "") + ").")
+    run.step("play", "done", save=False)
+    run.step("results", "working")
+    started = time.time()
+    attempt = 0
+    while time.time() - started < 10 * 60:
+        raiseIfStopped()
+        attempt += 1
+        job.progress(f"TEMS: Results - looking for Submit / Discard / Suspend, reloading if they're not there (try {attempt})…")
+        check = runTems("results", wo=runWo, timeout=3 * 60)
+        if check.get("found") or "no Submit button" in (check.get("error") or ""):
+            run.step("results", "done", save=False)
+            run.step("submit", "working")
+        if check.get("found") and check.get("submitted"):
+            run.step("submit", "done")
+            return True, check.get("summary") or "Submit pressed."
+        if check.get("found") or "no Submit button" in (check.get("error") or ""):
+            return stuck(f"Submit / Discard / Suspend showed, but Submit wasn't pressed: {check.get('error') or '?'}")
+        if not check.get("ok"):
+            job.progress(f"Results check: {check.get('error')}")
+        time.sleep(15)  # give TEMS a moment, then reload again
+    return stuck("Submit / Discard / Suspend didn't show on Results within 10 minutes.")
+
+
 def temsEnd(action, wo=""):
     """TEMS's finished-test page (stationary + mobility done): Suspend / Discard / Submit.
-    Submit for now = Suspend, then a picture of the WO's details on Assign (saved in the pictures folder
-    and on the WO - WhatsApp sends it with the CSV),
-    open it again and Cancel the stationary test - then it waits for you."""
+    Discard / Suspend: the WO gets tested again. Submit: Suspend, a picture of the WO's details on
+    Assign (saved in the pictures folder and on the WO - WhatsApp sends it with the CSV), open it
+    again, press play, then Results (reloaded until Submit / Discard / Suspend show) and press Submit.
+    Every one of them ends the run here: Live Testing no longer shows it as a test."""
     from kaam.chromeBridge import setTemsStage
+    runWo = temsRunWo(wo) or wo
+    track = {}
+    already = (submitRuns.get(woKey(runWo)) or {}).get("state") == "running"
+    if action == "submit" and not already:  # (already running: startJob hands back that job)
+        track["run"] = SubmitRun(runWo, "")
 
     def work(job):
+        run = track.get("run")
+        try:
+            return steps(job, run)
+        except Exception as error:  # Stop pressed / anything unexpected: the pop-up says where
+            if run and run.data["state"] == "running":
+                run.fail("Stopped by you." if type(error).__name__ == "StoppedError" else error)
+            raise
+
+    def steps(job, run):
         job.progress({"suspend": "TEMS: Suspend…", "discard": "TEMS: Discard (and Yes)…",
                       "submit": "TEMS: Chrome full window, Suspend, then a picture of the WO on Assign…"}[action])
-        result = runTems(action, wo=wo, timeout=6 * 60)
+        if run:
+            run.step("suspend", "working")
+        result = runTems(action, wo=runWo, timeout=6 * 60)
         picture = result.pop("screenshot", None)
-        if result.get("ok"):
-            setTemsStage("closed")
+        stepsDone = result.pop("stepsDone", None) or []
+        # Over once it went through - or once TEMS suspended / discarded it, even if a later step
+        # (Submit's picture or reopen) had trouble: the run itself has ended either way.
+        said = f"{result.get('summary') or ''} {result.get('error') or ''}".lower()
+        if result.get("ok") or "suspended" in said or "discarded" in said or "suspend" in stepsDone:
+            setTemsStage("closed", runWo)
+            markRunEnded(runWo, action)
         if picture:
-            path = saveTemsPicture(wo, picture)
+            path = saveTemsPicture(runWo, picture)
             result["summary"] = f"{result.get('summary') or 'Done'} Picture: {path}"
             result["picture"] = str(path)
-        if wo and getRecord(wo) and result.get("ok"):
-            workflows.safeSave(wo, event=result.get("summary"))
+            if run:
+                run.data["picture"] = str(path)
+                stepsDone = list(dict.fromkeys(stepsDone + ["picture"]))
+        if action == "submit":
+            if result.get("ok"):
+                run.done(["suspend", "picture", "reopen"])
+                ok, text = submitToResults(job, runWo, run)
+                result["summary"] = f"{result['summary']} {text}"
+                if ok:
+                    run.finish()
+                else:
+                    result.update(ok=False, error=f"{result['summary']}")
+            else:
+                run.done([s for s in stepsDone if s in dict(submitSteps)])
+                run.fail(result.get("error") or "TEMS didn't say what happened.")
+        if runWo and getRecord(runWo):
+            workflows.safeSave(runWo, event=result.get("summary") or result.get("error"))
         return result
-    title = {"suspend": "TEMS: suspend", "discard": "TEMS: discard", "submit": "TEMS: submit (suspend + picture)"}[action]
-    job = startJob("tems", wo, f"{title}{f' {wo}' if wo else ''}", work)
+    title = {"suspend": "TEMS: suspend", "discard": "TEMS: discard",
+             "submit": "TEMS: submit (suspend, picture, play, results, Submit)"}[action]
+    job = startJob("tems", runWo, f"{title}{f' {runWo}' if runWo else ''}", work)
+    if track.get("run"):
+        track["run"].data["jobId"] = job.id
     return jsonify({"job": job.toJson()})
+
+
+@app.post("/api/tems/submit/close")
+def temsSubmitClose():
+    """The Submit pop-up's Close: it's not shown again. Submitted in TEMS (by the app or marked done
+    by hand): the WO counts as done today from now on (Sheets' Coordinator data, Maps), even before
+    End Ticket's uploads."""
+    run = submitRunFor(body().get("wo", ""))
+    if run:
+        run["closed"] = True
+        wo = run.get("wo") or ""
+        record = getRecord(wo) if wo else None
+        if record:
+            fields = {"temsSubmit": dict(run)}
+            event = None
+            if run.get("state") == "done" and not record.get("submittedAt"):
+                fields["submittedAt"] = datetime.now().isoformat(timespec="seconds")
+                event = "Submitted in TEMS - moved to done (Coordinator data)"
+            workflows.safeSave(wo, event=event, **fields)
+    return jsonify({"ok": True})
+
+
+@app.post("/api/tems/submit/done")
+def temsSubmitDoneByHand():
+    """Submit got stuck and you finished it in TEMS yourself: marked submitted, done and dusted."""
+    from kaam.chromeBridge import setTemsStage
+    run = submitRunFor(body().get("wo", ""))
+    if not run:
+        return fail("No Submit to mark.")
+    wo = run.get("wo") or ""
+    run.update(state="done", byHand=True, endedAt=datetime.now().isoformat(timespec="seconds"))
+    setTemsStage("closed", wo)
+    markRunEnded(wo, "submit")
+    if wo and getRecord(wo):
+        workflows.safeSave(wo, event=f"TEMS: Submit finished by hand (the app got stuck at {run.get('failedAt') or '?'})",
+                           temsSubmit=dict(run))
+    return jsonify({"ok": True, "submit": run})
+
+
+@app.get("/api/tems/status")
+def temsStatusNow():
+    """Where the WO's test is right now - for Live Testing's test pop-up, also after an app restart.
+    Read from TEMS itself (its data service: run state, stationary points and waypoints done), plus
+    the TEMS tab's watcher when it reported in the last 2 minutes (it sees TEMS's screen). The
+    further-along of the two wins. stage: idle / ready / stationary / mobility / complete / paused /
+    failed / closed, or "" when TEMS can't be read."""
+    from kaam import temsMap
+    from kaam.chromeBridge import temsStage
+    order = {"stationary": 1, "mobility": 2, "complete": 3}
+    age = time.time() - temsStage["at"] if temsStage["at"] else None
+    watched = temsStage["stage"] if age is not None and age < 120 else ""
+    try:
+        status = temsMap.testStatus()
+        status["online"] = True
+    except Exception as error:
+        status = {"online": False, "error": str(error), "stage": "", "wo": temsStage["wo"] or ""}
+    stage, source = status.get("stage", ""), "tems"
+    if watched == "closed" and stage not in ("stationary", "mobility", "complete"):
+        stage, source = "closed", "watcher"
+    elif watched in order and (order[watched] > order.get(stage, 0) or not status["online"]):
+        stage, source = watched, "watcher"
+    # Ended here (Submit / Discard / Suspend): TEMS may still show that run's data, Submit reopens
+    # the WO, the TEMS tab may still say "complete" - none of it is a test any more.
+    ended = runEnded(status.get("wo") or temsStage["wo"])
+    if ended:
+        stage, source = "ended", "app"
+    # Submit's steps (running, done or stuck) until its pop-up is closed
+    submit = submitRunFor(status.get("wo") or temsStage["wo"])
+    status.update(stage=stage, source=source, watcherStage=watched, watcherAge=age, ended=ended,
+                  submit=dict(submit, labels=dict(submitSteps), order=[k for k, _ in submitSteps]) if submit else None)
+    return jsonify(status)
 
 
 @app.get("/api/tems/stage")
@@ -1093,6 +1613,8 @@ liveActions = {
     "airplane": "Airplane toggle",
     "hotspot": "Hotspot on the best phone",
 }
+deskActions = ("desk", "closePhones", "fullTestAll", "hotspot")  # use both phones: nothing else at the same time
+liveLock = threading.Lock()  # the "is something else running?" check and the start, as one step
 
 
 @app.get("/api/live/temsMap")
@@ -1209,7 +1731,7 @@ def liveRun():
     wo = workflows.cleanWorkOrder(data.get("wo", ""))
     if action not in liveActions:
         return fail(f"Unknown action {action}.")
-    if action not in ("desk", "closePhones", "fullTestAll", "hotspot") and not phone:
+    if action not in deskActions and not phone:
         return fail("Pick a phone.")
     missingWo = wo if wo and not getRecord(wo) else ""
     if missingWo:
@@ -1247,15 +1769,12 @@ def liveRun():
                 results = phoneControl.fullTestOneByOne(serials, onResult=lambda r: keep(job, r),
                                                         onOrder=lambda names: job.post("order", names))
                 return {"summary": " · ".join(resultText(r) for r in results), "results": results}
-            if action == "hotspot":  # on the phone with the best network now, off on the others
-                from kaam import liveSignal
+            if action == "hotspot":  # airplane on all at once, hotspot on the best of the quick ones
                 connected = set(phoneControl.connectedSerials())
                 serials = [s for s in phoneControl.configuredPhones().values() if s in connected]
                 if not serials:
                     raise RuntimeError("Neither TMO 1 nor TMO 2 (Settings > Phones) is connected.")
-                now = time.time()
-                fresh = {s: r for s, r in liveSignal.signals(serials).items() if r and now - r.get("at", 0) < 10}
-                return phoneControl.hotspotOnBest(serials, fresh)
+                return phoneControl.hotspotAfterAirplane(serials)
             serial = phoneControl.pickPhones([phone])[0]
             if action == "airplane":  # just re-attach to the network; no test, nothing saved
                 if phoneControl.toggleAirplane(serial):
@@ -1267,11 +1786,16 @@ def liveRun():
         finally:
             phoneControl.listenHere(None)
 
-    running = next((j for j in listJobs() if j["kind"] == "live" and j["state"] == "running"), None)
-    if running:  # one at a time: tests share the network, and Set up desk moves the same phones
-        return fail(f"Wait for \"{running['title']}\" to finish (or press Stop).")
+    # TMO 1 and TMO 2 run side by side (one job per phone); Set up desk / Close phones / Test All /
+    # Hotspot use both phones, so they wait for everything and everything waits for them.
     title = liveActions[action] + (f" · {phone}" if action in ("fullTest", "speedtest", "airplane") else "")
-    job = startJob("live", phone or action, title, work)
+    lane = action if action in deskActions else phone
+    with liveLock:
+        running = next((j for j in runningJobs("live")
+                        if action in deskActions or j.wo in deskActions or j.wo == lane), None)
+        if running:
+            return fail(f"Wait for \"{running.title}\" to finish (or press Stop).")
+        job = startJob("live", lane, title, work)
     return jsonify({"job": job.toJson()})
 
 

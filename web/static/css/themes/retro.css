@@ -208,3 +208,5 @@
 [data-theme="retro"] .mapsMap .leaflet-control-attribution { background: rgba(10, 8, 5, .8); }
 [data-theme="retro"] .picImg { background: #000; }
 [data-theme="retro"] .temsEnd { border-style: dashed; }
+[data-theme="retro"] .tpCard { box-shadow: inset 0 0 0 3px var(--panel), inset 0 0 0 4px #3d2d10, 0 0 30px rgba(255, 176, 0, .2); border-color: var(--accent); }
+[data-theme="retro"] .tpTitle { font-family: var(--display); font-weight: 400; font-size: 30px; text-transform: uppercase; }

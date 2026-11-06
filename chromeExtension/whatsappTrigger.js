@@ -14,6 +14,8 @@
       attempt: Number(params.get("kaamAttempt") || 1),
       checkFirst: params.get("kaamCheckFirst") === "1",
       text: params.get("kaamText") || "",  // a plain message (no file): typed in the chat box and sent
+      batch: params.get("kaamBatch") === "1",
+      inspect: params.get("kaamInspect") || "",  // sends nothing: describes the chat's last messages  // End Tickets: several WOs (their files and captions come with the files)
     },
   });
 })();

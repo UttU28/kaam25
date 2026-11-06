@@ -117,13 +117,21 @@ export default {
         : "Opens Create Ticket in TechInsights and fills it. You click Create yourself.") + tems, "info");
     }
 
+    let waiting = [], dragging = null, loadAgain = false;
     async function loadWaiting() {
+      if (dragging) { loadAgain = true; return; }  // don't repaint under your finger: after the drop
       let list = [];
       try { list = await api("/api/start/waiting"); } catch (e) { toast(e.message, "bad"); }
+      waiting = list;
+      paintWaiting();
+    }
+    function paintWaiting() {
+      const list = waiting;
       box.setPickerCount(list.length);
-      $(".waitCount", root).textContent = list.length ? `${list.length} for today${list[0].mapStop ? " · map order" : ""}` : "";
+      $(".waitCount", root).textContent = list.length ? `${list.length} for today${list[0].mapStop ? " · map order" : ""}${list.length > 1 ? " · drag ⋮⋮ to reorder" : ""}` : "";
       $(".waiting", root).innerHTML = list.length ? list.map((r) => `
-          <div class="listItem" data-wo="${esc(r.wo)}">
+          <div class="listItem ${list.length > 1 ? "drag" : ""}" data-wo="${esc(r.wo)}" data-key="${esc(r.key)}" ${list.length > 1 ? 'draggable="true"' : ""}>
+            ${list.length > 1 ? `<span class="grip" title="Drag to change the order - saved on Maps too">⋮⋮</span>` : ""}
             ${r.mapStop ? `<span class="mapStop" title="Stop ${r.mapStop} on today's map">${r.mapStop}</span>` : ""}
             <div style="min-width:0;flex:1"><div class="t1">${esc(r.cluster || r.wo)}</div><div class="t2">${esc(r.gridKey || r.wo)}${r.gridCount > 1 ? ` · ${r.gridCount} grids` : ""}</div></div>
             ${r.hasLocation ? `<span title="Has a location" style="color:var(--faint)">${icon("pin", "sm")}</span>` : ""}
@@ -135,6 +143,59 @@ export default {
       const item = e.target.closest(".listItem");
       if (item && !busy) { box.set(item.dataset.wo); msg("Picked from your imported list. Press Start (or Enter).", "info"); box.focus(); }
     });
+
+    // ----- drag to reorder: the same order as Maps (saved as today's "Your order" there) -----
+    const waitList = $(".waiting", root);
+    const clearDrop = () => waitList.querySelectorAll(".dropBefore, .dropAfter").forEach((r) => r.classList.remove("dropBefore", "dropAfter"));
+    waitList.addEventListener("dragstart", (e) => {
+      const row = e.target.closest(".listItem.drag");
+      if (!row) return;
+      dragging = row.dataset.key;
+      row.classList.add("dragging");
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", dragging);
+    });
+    waitList.addEventListener("dragover", (e) => {
+      if (!dragging) return;
+      const row = e.target.closest(".listItem.drag");
+      if (!row) return;
+      e.preventDefault();
+      clearDrop();
+      if (row.dataset.key === dragging) return;
+      const r = row.getBoundingClientRect();
+      row.classList.add(e.clientY < r.top + r.height / 2 ? "dropBefore" : "dropAfter");
+    });
+    waitList.addEventListener("drop", (e) => {
+      if (!dragging) return;
+      e.preventDefault();
+      const row = waitList.querySelector(".dropBefore, .dropAfter");
+      const from = dragging;
+      if (!row) return;
+      const keys = waiting.map((r) => r.key).filter((k) => k !== from);
+      let at = keys.indexOf(row.dataset.key);
+      if (row.classList.contains("dropAfter")) at += 1;
+      keys.splice(at, 0, from);
+      saveOrder(keys);
+    });
+    waitList.addEventListener("dragend", () => {
+      waitList.querySelectorAll(".dragging").forEach((r) => r.classList.remove("dragging"));
+      clearDrop();
+      dragging = null;
+      if (loadAgain) { loadAgain = false; loadWaiting(); }
+    });
+    async function saveOrder(keys) {
+      const before = waiting;
+      const byKey = new Map(waiting.map((r) => [r.key, r]));
+      waiting = keys.map((k, i) => ({ ...byKey.get(k), mapStop: i + 1 }));  // shows at once, numbered 1..n
+      paintWaiting();
+      try {
+        await api("/api/start/order", { body: { keys } });
+        toast("Order saved - Maps follows it too.", "ok", 2200);
+      } catch (error) {
+        waiting = before; paintWaiting();
+        toast(error.message, "bad");
+      }
+    }
 
     // ----- start -----
     function setBusy(on) {
@@ -151,6 +212,7 @@ export default {
     // ----- TEMS: checked before the ticket, Reserve + Open after it (test mode: check only) -----
     const temsTestMode = () => !!store.settings?.temsTestMode;
     let skipTemsFor = null;  // a WO you chose to start without TEMS
+    let openInTems = null;   // the WO TEMS already has active: no Reserve / Open, straight to Live Testing
     async function runTemsJob(request) {
       const { job: started } = await api("/api/tems", { body: request });
       return job.run(started);
@@ -239,6 +301,12 @@ export default {
         openLiveTesting(wo);
         return;
       }
+      if (wo && openInTems === wo) {  // TEMS already has it active (Control / Map): nothing to reserve or open
+        msg(`${ticketText} ${wo} is already open in TEMS - on to Live Testing.`, "ok");
+        openInTems = null;
+        openLiveTesting(wo);
+        return;
+      }
       if (!wo || skipTemsFor === wo) { if (skipTemsFor === wo) msg(`${ticketText} TEMS skipped.`, "warn"); return; }
       setBusy(true);
       try {
@@ -279,7 +347,33 @@ export default {
       let wo = box.get();
       if (!wo) { msg("Enter a WO first.", "bad"); box.focus(); return; }
       if (busy) return;
-      skipTemsFor = null; temsDone = null;
+      skipTemsFor = null; temsDone = null; openInTems = null;
+      // First: is a WO already active in TEMS (Control / Map up)? Another one -> say so; this one -> no
+      // Reserve / Open needed. (Read from TEMS's own data - nothing is clicked.)
+      if (!temsTestMode()) {
+        let tems = null;
+        try { tems = await api(`/api/tems/active?wo=${enc(wo)}`); } catch { /* TEMS check below says if it can't */ }
+        if (tems?.otherWo) {
+          const choice = await modal({
+            title: "A different WO is running in TEMS",
+            body: `The WO you want, <b>${esc(wo)}</b>, isn't running in TEMS - <b>${esc(tems.otherWo)}</b> is (${esc(tems.stateName)}).\n\n` +
+              `Finish, suspend or close <b>${esc(tems.otherWo)}</b> in TEMS first, then start again. ` +
+              `Or make the ticket now and leave TEMS as it is (no Reserve / Open).`,
+            buttons: [{ label: "Cancel", value: null }, { label: "Start ticket, leave TEMS", value: "skip", cls: "btnAmber" }],
+          });
+          if (choice !== "skip") { msg(`Not started - ${tems.otherWo} is running in TEMS, not ${wo}.`, "warn"); return; }
+          skipTemsFor = wo;
+          await start();
+          return;
+        }
+        if (tems?.same) {
+          openInTems = wo;
+          msg(`${wo} is already open in TEMS (${tems.stateName}) - no Reserve / Open needed. Making the ticket…`, "info");
+          await start();
+          return;
+        }
+        if (tems?.closed) toast(`${wo} shows Closed in TEMS - it'll be reserved and opened again.`, "info", 6000);
+      }
       // Always first: find the WO in TEMS and take TEMS's spelling (d / e) before anything is made.
       // Cloud: check only, then the ticket, then Reserve + Open. Local (prod): one TEMS visit does the
       // check, Reserve and Open, then the local start is saved.

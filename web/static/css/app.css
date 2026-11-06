@@ -232,6 +232,16 @@ kbd { font: 600 10.5px var(--sans); padding: 2px 6px; border-radius: 5px; backgr
 .callout.warn { background: var(--amberSoft); border-color: rgba(227, 166, 61, .28); color: #f1c77d; }
 .callout.ok { background: var(--greenSoft); border-color: rgba(52, 199, 123, .28); color: #7fe0ab; }
 .callout.bad { background: var(--redSoft); border-color: rgba(239, 93, 93, .3); color: #ffadad; }
+/* Needs redo: the WOs a bulk End / Close stopped on */
+.redoBox { border: 1px solid rgba(239, 93, 93, .3); background: var(--redSoft); border-radius: 10px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+.redoHead { display: flex; align-items: flex-start; gap: 10px; color: #ffadad; font-size: 12.5px; }
+.redoHead > div { flex: 1; min-width: 0; }
+.redoHead small { display: block; color: var(--muted); }
+.redoRow { display: flex; align-items: center; gap: 10px; padding-top: 8px; border-top: 1px dashed rgba(239, 93, 93, .25); }
+.redoText { flex: 1; min-width: 0; }
+.redoWo { font-size: 12.5px; color: var(--text); word-break: break-all; }
+.redoRow .note { word-break: break-word; }
+.redoBtns { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
 
 /* mono preview box */
 .pre {
@@ -259,6 +269,15 @@ kbd { font: 600 10.5px var(--sans); padding: 2px 6px; border-radius: 5px; backgr
 .qrImg { width: min(260px, 70vw); height: auto; aspect-ratio: 1; background: #fff; border-radius: 10px; padding: 6px; image-rendering: pixelated; }
 .qrLink { font-size: 12.5px; word-break: break-all; color: var(--accent); }
 .qrActions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+/* Connection page: one big QR of the app's WiFi address */
+.connPage { max-width: 640px; margin: 0 auto; width: 100%; }
+.connBody { display: flex; flex-direction: column; gap: 16px; }
+.connQr .qrImg { width: min(340px, 78vw); }
+.connUrl { font-size: 18px; }
+.connSteps { max-width: 440px; line-height: 1.5; }
+.connOthers { display: flex; flex-direction: column; gap: 6px; border-top: 1px dashed var(--line, #333); padding-top: 12px; }
+.connOther { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.connOther a { color: var(--accent); word-break: break-all; }
 .woBox.compact .pickCount { position: absolute; top: -5px; right: -5px; min-width: 15px; height: 15px; padding: 0 3px;
   border-radius: 999px; background: var(--accent); color: #fff; font: 700 9.5px/15px var(--font, system-ui); text-align: center; }
 .woBox.compact .insideTools .iconBtn.failed { color: var(--red); }
@@ -631,6 +650,13 @@ kbd { font: 600 10.5px var(--sans); padding: 2px 6px; border-radius: 5px; backgr
 .stopRow.dragging { opacity: .4; }
 .stopRow.dropBefore { box-shadow: inset 0 2px 0 var(--accent); }
 .stopRow.dropAfter { box-shadow: inset 0 -2px 0 var(--accent); }
+/* Start's To start list: the same drag to reorder */
+.listItem.drag { padding-left: 8px; }
+.listItem .grip { width: 14px; color: var(--faint); cursor: grab; font-size: 13px; letter-spacing: -2px; text-align: center; flex: none; user-select: none; }
+.listItem.drag:hover .grip { color: var(--text); }
+.listItem.dragging { opacity: .4; }
+.listItem.dropBefore { box-shadow: inset 0 2px 0 var(--accent); }
+.listItem.dropAfter { box-shadow: inset 0 -2px 0 var(--accent); }
 .srBody { min-width: 0; flex: 1; }
 .srWo { font-family: var(--mono); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .srMeta { font-size: 11.5px; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -926,3 +952,122 @@ table.sheet tr.missingRow td { background: color-mix(in srgb, var(--red) 9%, tra
   .cardHead .hint { order: 5; flex-basis: 100%; white-space: normal; }
   .cardHead .actions { gap: 6px; }
 }
+
+/* ---------- Live Testing: the TEMS test pop-up (stationary / mobility / results) ---------- */
+.testPop { position: fixed; inset: 0; z-index: 85; display: grid; place-items: center; padding: 20px;
+  background: rgba(5, 7, 10, .55); backdrop-filter: blur(4px); animation: fade .2s; }
+.tpCard { width: min(460px, 100%); padding: 18px 22px 22px; text-align: center; background: var(--panel); color: var(--text);
+  border: 1px solid var(--borderStrong); border-radius: calc(var(--radius) + 4px); box-shadow: var(--shadow); animation: rise .25s ease-out; }
+.tpTop { display: flex; align-items: center; }
+.tpKicker { font-size: 11px; font-weight: 700; letter-spacing: 1.2px; text-transform: uppercase; color: var(--faint); }
+.tpTitle { margin: 6px 0 6px; font-size: 21px; }
+.tpText { margin: 0 auto; max-width: 360px; color: var(--muted); font-size: 13.5px; line-height: 1.5; }
+.tpWo { margin-top: 10px; font-size: 12px; color: var(--faint); word-break: break-all; }
+/* the loader: rings pulsing out (stationary), a turning dashed ring (mobility), a tick (results) */
+.tpVisual { position: relative; width: 96px; height: 96px; margin: 8px auto 10px; }
+.tpRing, .tpCore { position: absolute; border-radius: 50%; }
+.tpRing { inset: 0; border: 2px solid var(--accent); opacity: 0; }
+.testPop.busy .tpRing { animation: tpPulse 2.4s ease-out infinite; }
+.testPop.busy .tpRing.two { animation-delay: 1.2s; }
+@keyframes tpPulse { 0% { transform: scale(.45); opacity: .9; } 100% { transform: scale(1.05); opacity: 0; } }
+.tpCore { inset: 30px; background: var(--accentSoft); border: 2px solid var(--accent); box-shadow: 0 0 22px var(--accentSoft); }
+.tpCore::after { content: ""; position: absolute; inset: 9px; border-radius: 50%; background: var(--accent); animation: tpBreathe 1.6s ease-in-out infinite alternate; }
+@keyframes tpBreathe { from { transform: scale(.7); opacity: .7; } to { transform: scale(1); opacity: 1; } }
+.testPop.move .tpRing { border-color: var(--green); }
+.testPop.move .tpRing.two { inset: 6px; opacity: 1; border: 3px dashed var(--green); animation: tpSpin 3s linear infinite; }
+@keyframes tpSpin { to { transform: rotate(360deg); } }
+.testPop.move .tpCore { border-color: var(--green); background: var(--greenSoft); }
+.testPop.move .tpCore::after { background: var(--green); }
+.testPop.move .tpCard { animation: rise .25s ease-out, tpGo 1.2s ease-out 2; }
+@keyframes tpGo { 40% { box-shadow: var(--shadow), 0 0 0 6px var(--greenSoft); } }
+.testPop.finished .tpCore { inset: 18px; background: var(--green); border-color: var(--green); box-shadow: 0 0 30px var(--greenSoft); }
+.testPop.finished .tpCore::after { inset: 0; background: none; border-radius: 0; animation: none; margin: auto; width: 26px; height: 14px;
+  border-left: 4px solid var(--ink); border-bottom: 4px solid var(--ink); transform: translateY(-3px) rotate(-45deg); }
+.testPop.bad .tpCore, .testPop.bad .tpRing { border-color: var(--red); }
+.testPop.bad .tpCore { background: var(--redSoft); }
+.testPop.bad .tpCore::after { background: var(--red); animation: none; }
+.testPop[data-stage="paused"] .tpCore::after { background: none; inset: 10px 12px; border-left: 5px solid var(--amber); border-right: 5px solid var(--amber); border-radius: 0; animation: none; }
+.testPop[data-stage="paused"] .tpCore { border-color: var(--amber); background: var(--amberSoft); }
+/* progress and the three steps */
+.tpProgress { display: flex; align-items: center; gap: 10px; margin-top: 14px; }
+.tpProgress[hidden] { display: none; }
+.tpBar { flex: 1; height: 6px; border-radius: 6px; background: var(--field); overflow: hidden; }
+.tpBar i { display: block; height: 100%; width: 0; border-radius: 6px; background: var(--accent); transition: width .4s; }
+.testPop.move .tpBar i { background: var(--green); }
+.tpCount { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.tpSteps { display: flex; justify-content: center; gap: 6px; margin-top: 16px; }
+.tpStep { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px 4px 4px; border-radius: 999px; font-size: 12px; font-weight: 650;
+  color: var(--faint); background: var(--field); border: 1px solid var(--border); }
+.tpStep b { display: grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; font-size: 10.5px; background: var(--border); color: var(--muted); }
+.tpStep.now { color: var(--text); border-color: var(--accent); }
+.tpStep.now b { background: var(--accent); color: var(--ink); }
+.tpStep.done { color: var(--green); }
+.tpStep.done b { background: var(--green); color: var(--ink); }
+.tpMeta { display: flex; flex-direction: column; gap: 4px; margin-top: 12px; font-size: 12px; color: var(--faint); }
+.tpWorking { color: var(--accent); }
+.tpWorking:empty, .tpTimer:empty { display: none; }
+.tpActions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 16px; }
+.tpActions[hidden] { display: none; }
+.tpActions .btn { padding: 0 10px; }
+.tpActions .btn.working { opacity: 1; position: relative; }
+.tpActions .btn.working .i { animation: tpSpin 1s linear infinite; }
+@media (max-width: 460px) { .tpActions { grid-template-columns: minmax(0, 1fr); } }
+/* stationary / mobility: the live TEMS map in a box at the top, the card wider, no loader */
+.testPop.withMap .tpCard { width: min(820px, 100%); max-height: calc(100vh - 24px); overflow-y: auto; padding-top: 14px; }
+.testPop.withMap .tpVisual { display: none; }
+.tpMapSlot { margin: 8px 0 12px; }
+.tpMapSlot[hidden] { display: none; }
+.temsMap.compact { border-radius: var(--radius); box-shadow: none; text-align: left; }
+.temsMap.compact .tmHead { display: none; }
+.temsMap.compact .tmTools { padding: 8px 10px; }
+.temsMap.compact .tmMap { height: clamp(260px, 52vh, 560px); touch-action: none; }
+@media (max-width: 600px) { .testPop.withMap { padding: 8px; } .temsMap.compact .tmMap { height: 46vh; } }
+/* Submit: its steps, the stuck box + question, the result form, Close */
+.testPop.submitting .tpCard { width: min(640px, 100%); max-height: calc(100vh - 24px); overflow-y: auto; }
+.testPop.submitting .tpVisual { width: 72px; height: 72px; margin: 4px auto 6px; }
+.testPop.submitting .tpCore { inset: 22px; }
+.testPop.submitting.finished .tpCore { inset: 12px; }
+.tpSubmit[hidden], .tpFail[hidden], .tpClose[hidden] { display: none; }
+.tpSubSteps { list-style: none; margin: 14px 0 0; padding: 10px 12px; display: grid; gap: 6px; text-align: left;
+  background: var(--field); border: 1px solid var(--border); border-radius: var(--radius); }
+.tpSubSteps li { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--faint); min-width: 0; }
+.tpSubSteps li .hint { margin-left: auto; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tpSubSteps .sIco { display: grid; place-items: center; flex: none; width: 20px; height: 20px; border-radius: 50%; border: 1.5px solid var(--border); }
+.tpSubSteps li.done { color: var(--text); }
+.tpSubSteps li.done .sIco { background: var(--green); border-color: var(--green); color: var(--ink); }
+.tpSubSteps li.working { color: var(--accent); font-weight: 650; }
+.tpSubSteps li.working .sIco { border-color: var(--accent); color: var(--accent); }
+.tpSubSteps li.working .sIco .i { animation: tpSpin 1s linear infinite; }
+.tpSubSteps li.failed { color: var(--red); font-weight: 650; }
+.tpSubSteps li.failed .sIco { background: var(--red); border-color: var(--red); color: #fff; }
+.tpFail { margin-top: 10px; text-align: left; display: grid; gap: 10px; }
+.tpFailText { display: flex; gap: 8px; padding: 10px 12px; border-radius: var(--radius); background: var(--redSoft); color: var(--text);
+  border: 1px solid var(--red); font-size: 13px; line-height: 1.45; }
+.tpFailText > .i { color: var(--red); flex: none; margin-top: 2px; }
+.tpAsk { padding: 10px 12px; border-radius: var(--radius); background: var(--amberSoft); border: 1px solid var(--amber); font-size: 13px; line-height: 1.45; }
+.tpAskBtns { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.tpForm { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); text-align: left; display: grid; gap: 10px; }
+.tpFormHead { display: flex; align-items: baseline; gap: 10px; }
+.tpFormHead .sectionT { margin: 0; }
+.tpSaved { margin-left: auto; font-size: 12px; }
+.tpForm .formGrid { margin: 0; }
+.tpClose { margin-top: 16px; display: grid; }
+@media (max-width: 560px) { .tpForm .formGrid { grid-template-columns: minmax(0, 1fr); } }
+/* hidden: a small pill keeps the test in view */
+.testPill { position: fixed; z-index: 80; left: 50%; bottom: 18px; transform: translateX(-50%); display: inline-flex; align-items: center; gap: 9px;
+  height: 38px; padding: 0 16px; border-radius: 999px; background: var(--panel); color: var(--text); border: 1px solid var(--accent);
+  box-shadow: var(--shadow); font: 650 13px var(--sans); cursor: pointer; }
+.testPill .pDot { width: 9px; height: 9px; border-radius: 50%; background: var(--accent); animation: tpBreathe 1s ease-in-out infinite alternate; }
+.testPill[data-stage="mobility"] { border-color: var(--green); }
+.testPill[data-stage="mobility"] .pDot, .testPill[data-stage="complete"] .pDot { background: var(--green); }
+.testPill .pTime { color: var(--muted); font-size: 12px; }
+@media (prefers-reduced-motion: reduce) { .testPop *, .testPill * { animation: none !important; } }
+/* Live Testing: the last run was ended here (Submit / Discard / Suspend) */
+.runNote { display: flex; align-items: center; gap: 8px; margin-top: 10px; padding: 9px 12px; border-radius: var(--radiusSm);
+  font-size: 13px; color: var(--text); background: var(--greenSoft); border: 1px solid color-mix(in srgb, var(--green) 35%, transparent); }
+.runNote[hidden] { display: none; }
+.runNote .i { color: var(--green); }
+.runNote[data-as="discard"] { background: var(--redSoft); border-color: color-mix(in srgb, var(--red) 35%, transparent); }
+.runNote[data-as="discard"] .i { color: var(--red); }
+.runNote[data-as="suspend"] { background: var(--amberSoft); border-color: color-mix(in srgb, var(--amber) 35%, transparent); }
+.runNote[data-as="suspend"] .i { color: var(--amber); }

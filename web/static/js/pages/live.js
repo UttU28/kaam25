@@ -4,10 +4,10 @@
 //   Desk      - phones unlocked + Service Mode / Speedtest, Vysor windows, Chrome left half, phones right
 //   Desk sets up everything (skips what's done); per phone: the network it's on (NR / LTE / no service),
 //   Full test and Speed test (both save the speed and network on the WO), Airplane (toggle only)
-//   Test all  - full test on each phone in turn (never two speed tests at once)
+//   Test all  - airplane toggle on both phones at once, then the speed tests one by one (never two at once)
 //   TEMS map  - the TEMS Paragon map (grid, route, track, car), live
-import { $, api, copyText, enc, esc, icon, toast } from "../core.js";
-import { jobPanel, woBox } from "../components.js";
+import { $, api, copyText, enc, esc, h, icon, modal, refreshState, store, toast } from "../core.js";
+import { jobPanel, seg, woBox } from "../components.js";
 import { temsMapCard } from "../temsMapCard.js";
 
 const lastKey = "kaamLiveResults";  // last result per phone (with the WO it was run on)
@@ -73,8 +73,13 @@ export default {
   title: "Live Testing",
   sub: "Speed tests for the WO you're driving",
   render(root, params) {
-    let info = null, record = null, wo = "", busy = false, timer = null;
-    let pending = [];  // phones being tested right now, in test order
+    let info = null, record = null, wo = "", timer = null;
+    // What's running: "desk" (Set up desk / Close phones / Hotspot / Test All - both phones) or a
+    // phone's name (its Full test / Airplane / Speed test). TMO 1 and TMO 2 run side by side.
+    const lanes = new Set();
+    const busy = () => lanes.size > 0;
+    let pending = [];  // phones waiting for a speed result; Test All: in its test order
+    let testing = new Set();  // of those, the ones testing right now
     let live = {};     // phone name -> latest live signal reading
     let sigTimer = null;
     root.innerHTML = `
@@ -86,20 +91,21 @@ export default {
             <div class="pair">
               <button class="btn btnPrimary lg" data-action="desk" title="Unlocks the phones, sets up Service Mode + Speedtest and Vysor where missing (skips what is already done), Chrome on the left half, TMO 1 and TMO 2 a quarter each on the right">${icon("desk")}<span>Set up desk</span></button>
               <button class="btn btnGhost lg" data-action="closePhones" title="Closes the TMO 1 and TMO 2 windows in Vysor (the phones keep running) - press Set up desk to open them again">${icon("x")}<span>Close phones</span></button>
-              <button class="btn btnGhost lg" data-action="hotspot" title="Turns Mobile Hotspot on on the phone with the best network right now (NR first, then the stronger signal) and off on the other one. Same name and password on both, so devices just reconnect. It never switches by itself.">${icon("hotspot")}<span>Hotspot</span></button>
+              <button class="btn btnGhost lg" data-action="hotspot" title="Airplane toggle on both phones at the same time (that turns any old hotspot off). Once the first is back online it waits 2s more, then turns Mobile Hotspot on on the best of the phones back by then (NR first, then the stronger signal) - a phone slow to load the network is left out. Same name and password on both, so devices just reconnect.">${icon("hotspot")}<span>Hotspot</span></button>
               <button class="btn btnPurple lg" data-action="temsPlay" title="Closes and reopens the phones; in TEMS opens the WO from Assign if it isn't open, waits till it's ready (green), then Control and play - then stays on TEMS">${icon("play")}<span class="temsPlayLabel">Start Stationary</span></button>
-              <button class="btn btnGreen lg" data-action="fullTestAll" title="Each phone in turn, NR phones first then LTE: Service Mode + Speedtest, airplane toggle, speed test, wait for the result - then the next phone">${icon("gauge")}<span>Test All</span></button>
+              <button class="btn btnGreen lg" data-action="fullTestAll" title="Service Mode + Speedtest where missing, airplane toggle on both phones at the same time, then the speed tests one phone after the other (NR phones first, then LTE)">${icon("gauge")}<span>Test All</span></button>
             </div>
             </div>
             <div class="temsEnd" hidden>
               <div class="temsEndText">${icon("check", "sm")}<span><b>TEMS: stationary and mobility done.</b> What now?</span></div>
               <div class="temsEndBtns">
-                <button class="btn btnGreen" data-tems="submit" title="For now: Chrome full window, Suspend in TEMS, a picture of the WO's details on Assign (saved in the pictures folder and on the WO, used for WhatsApp), open it again and Cancel the stationary test - then it waits for you">${icon("check", "sm")}<span>Submit</span></button>
+                <button class="btn btnGreen" data-tems="submit" title="Suspend in TEMS, a picture of the WO's details on Assign (saved on the WO, used for WhatsApp), open it again and press play, then Results (reloaded until Submit / Discard / Suspend show) and press Submit">${icon("check", "sm")}<span>Submit</span></button>
                 <button class="btn btnGhost" data-tems="discard" title="Discard in TEMS (and Yes to its confirm)">${icon("x", "sm")}<span>Discard</span></button>
                 <button class="btn btnGhost" data-tems="suspend" title="Suspend in TEMS (and OK to its &quot;summary created&quot;)">${icon("pause", "sm")}<span>Suspend</span></button>
               </div>
             </div>
             <div class="liveHint allHint"></div>
+            <div class="runNote" hidden></div>
             <div class="msg"></div>
           </div>
         </div>
@@ -118,7 +124,15 @@ export default {
         </div>
       </div>`;
     const q = (s) => $(s, root);
-    const job = jobPanel(); q(".jobSlot").replaceWith(job.el);
+    // One job panel for the desk (and TEMS), one per phone so TMO 1 and TMO 2 show side by side.
+    const job = jobPanel(), jobSlots = h(`<div class="stack jobSlots"></div>`), phoneJobs = {};
+    jobSlots.append(job.el); q(".jobSlot").replaceWith(jobSlots);
+    function panelFor(lane) {
+      if (lane === "desk") return job;
+      if (!phoneJobs[lane]) { phoneJobs[lane] = jobPanel(); jobSlots.append(phoneJobs[lane].el); }
+      return phoneJobs[lane];
+    }
+    const hideJobs = () => [job, ...Object.values(phoneJobs)].forEach((panel) => panel.hide());
     const temsMap = temsMapCard(); q(".mapSlot").replaceWith(temsMap.el);
 
     const box = woBox({
@@ -135,7 +149,7 @@ export default {
       onResolve: (newWo, rec) => {
         const next = rec ? newWo : "";
         // A different WO: nothing from the one before (last speeds, job log) is left showing.
-        if (next !== wo && !busy) { clearLast(); job.hide(); }
+        if (next !== wo && !busy()) { clearLast(); hideJobs(); }
         wo = next; record = rec; paintWo(); paintPhones();
       },
       onEnter: () => {},
@@ -224,7 +238,7 @@ export default {
       api("/api/end/open?all=1").then((open) => {
         const driving = open.filter((r) => !r.resultReady && r.wo !== wo)
           .sort((a, b) => (b.startedAt || "").localeCompare(a.startedAt || ""))[0];
-        if (!driving || busy) return;
+        if (!driving || busy()) return;
         toast(`${wo}: result file is in. Switched to ${driving.wo}.`, "ok", 6000);
         box.set(driving.wo);
       }).catch(() => {});
@@ -264,7 +278,7 @@ export default {
           p.airplane ? `<span class="badge bAmber">${icon("plane", "sm")}Airplane</span>` : "",
           p.testScreen ? `<span class="badge bBlue">Service Mode + Speedtest</span>` : p.connected ? `<span class="badge bGrey">Not set up</span>` : "",
         ].join("");
-        const off = !p.connected || busy ? "disabled" : "";
+        const off = !p.connected || lanes.has("desk") || lanes.has(p.name) ? "disabled" : "";
         const button = (action, cls, ico, label, title) =>
           `<button class="btn ${cls}" data-action="${action}" data-phone="${esc(p.name)}" title="${esc(title)}" ${off}>${icon(ico, "sm")}<span>${label}</span></button>`;
         return `
@@ -281,7 +295,7 @@ export default {
               <div class="speedRow">
                 ${pending.includes(p.name)
                   ? `<div class="speedBig dim">--.--</div>
-                     <div class="speedMeta"><span class="spinner"></span> <b>${pending[0] === p.name ? "Testing now…" : "Waiting its turn…"}</b><br>waiting for the result</div>`
+                     <div class="speedMeta"><span class="spinner"></span> <b>${testing.has(p.name) ? "Testing now…" : "Waiting its turn…"}</b><br>waiting for the result</div>`
                   : `${speed(r)}
                 <div class="speedMeta">${r ? `${r.error ? esc(r.error) : `ping <b>${esc(r.ping || "?")}</b>`} · ${time(r.at)}${r.network ? ` · ${esc(techOf(r.network))}` : ""}` : "No test yet"}
                   ${top ? `<br>Best on WO <b>${esc(top.download)}</b> (${esc(techOf(top.network))})` : ""}</div>`}
@@ -294,7 +308,7 @@ export default {
             </div>
           </div>`;
       }).join("");
-      for (const b of root.querySelectorAll("button[data-action='desk'], button[data-action='closePhones'], button[data-action='hotspot'], button[data-action='fullTestAll']")) b.disabled = busy;
+      for (const b of root.querySelectorAll("button[data-action='desk'], button[data-action='closePhones'], button[data-action='hotspot'], button[data-action='fullTestAll']")) b.disabled = busy();
     }
 
     // Live signal: only the chip and the strip change (buttons stay put while you press them).
@@ -316,27 +330,38 @@ export default {
     // Start Stationary: phones reopened; TEMS opens the WO from Assign if needed, waits till it's
     // green, then Control and play (the server checks TEMS's state first).
     let temsBusy = false;
-    async function temsJob(body, buttons) {
+    async function temsJob(body, buttons, onLine = () => {}) {
       if (temsBusy) return;
       temsBusy = true; buttons.forEach((b) => (b.disabled = true));
       let linesShown = 0;
       try {
         const { job: started } = await api("/api/tems", { body });
         const done = await job.run(started, (j) => {
-          (j.lines || []).slice(linesShown).forEach((line) => stepToast(line.text));
+          (j.lines || []).slice(linesShown).forEach((line) => { stepToast(line.text); onLine(line.text); });
           linesShown = (j.lines || []).length;
         });
         const text = done.state === "done" ? (done.result?.summary || done.result?.error) : done.error || "Stopped.";
-        toast(text, done.state === "done" && done.result?.ok !== false ? "ok" : "bad", 10000);
+        if (done.result?.otherWo) {  // TEMS has a different WO active: say so, nothing was pressed
+          await modal({
+            title: "A different WO is running in TEMS",
+            body: `The WO you want, <b>${esc(done.result.wantedWo || body.wo || "")}</b>, isn't running in TEMS -
+              <b>${esc(done.result.otherWo)}</b> is (${esc(done.result.otherState || "active")}).\n\nNothing was pressed.
+              Finish, suspend or close <b>${esc(done.result.otherWo)}</b> in TEMS first - or pick it here as the WO under test.`,
+            buttons: [{ label: "OK", value: true, cls: "btnPrimary" }],
+          });
+        } else toast(text, done.state === "done" && done.result?.ok !== false ? "ok" : "bad", 10000);
       } catch (error) { toast(error.message, "bad", 8000); }
       finally { temsBusy = false; buttons.forEach((b) => (b.disabled = false)); pollStage(true); }
     }
-    const startTems = (button) => temsJob({ action: "play", wo }, [button]);
+    const startTems = (button) => {
+      starting = true; paintPop();
+      return temsJob({ action: "play", wo }, [button], (line) => pop.working(line)).finally(() => { starting = false; pollStage(true); });
+    };
 
-    // ---------- where the TEMS test is (the TEMS tab reports it) ----------
-    // started / stationary -> "Start Stationary"; mobility (stationary done) -> "Start Mobility" + beep;
-    // complete -> Submit / Discard / Suspend show (+ beep); closed -> back to "Start Stationary".
-    let stage = "", stageTimer = null, audio = null;
+    // ---------- where the TEMS test is: read from TEMS itself (also after a restart) ----------
+    // A pop-up follows the test: stationary (stay put) -> mobility (move: beep) -> complete (Submit /
+    // Discard / Suspend, double beep). It can be hidden to a small pill; a new stage shows it again.
+    let stage = "", status = {}, stageTimer = null, audio = null, starting = false, ending = "";
     root.addEventListener("pointerdown", () => {  // browsers only allow sound after a click on the page
       try { audio = audio || new (window.AudioContext || window.webkitAudioContext)(); audio.resume?.(); } catch { /* no sound */ }
     });
@@ -350,32 +375,79 @@ export default {
         }
       } catch { /* no sound */ }
     }
-    function showStage(next) {
-      const changed = next !== stage;
+
+    const pop = testPopup();
+    document.body.append(pop.el, pop.pill);
+    pop.onAction = async (kind) => {
+      if (kind === "discard") {
+        const target = status.wo || wo || "this WO";
+        const sure = await modal({
+          title: "Discard this test?",
+          body: `Discard <b>${esc(target)}</b> in TEMS?\n\nIts test run is thrown away - you'll test this WO again with Start Stationary.`,
+          buttons: [{ label: "Cancel", value: false }, { label: "Yes, discard", value: true, cls: "btnDanger" }],
+        });
+        if (!sure) return;
+      }
+      ending = kind;
+      paintPop();
+      temsJob({ action: kind, wo: status.wo || wo }, [...q(".temsEnd").querySelectorAll("button")], (line) => pop.working(line))
+        .finally(() => { ending = ""; paintPop(); });
+    };
+    // Submit's own screen: its steps, the result form, and Close once it's done (or "did you
+    // finish it by hand?" when it got stuck). Stays until Close, also after a reload / restart.
+    pop.onSubmitDone = async (forWo) => {
+      try { await api("/api/tems/submit/done", { body: { wo: forWo } }); toast(`${forWo}: marked submitted - done and dusted.`, "ok", 6000); refreshState(); }
+      catch (error) { toast(error.message, "bad"); }
+      pollStage(true);
+    };
+    pop.onSubmitClose = async (forWo) => {
+      try { await api("/api/tems/submit/close", { body: { wo: forWo } }); } catch (error) { toast(error.message, "bad"); }
+      status = { ...status, submit: null };
+      paintPop(); pollStage(true);
+    };
+    function paintPop() {
+      // While Submit / Discard / Suspend runs, its own screen stays up (the run is already marked
+      // over as soon as TEMS suspends it, but Submit keeps going: picture, play, results, Submit).
+      const shown = starting ? "starting" : status.submit || ending === "submit" ? "submit" : ending ? `ending-${ending}` : stage;
+      pop.show(shown, status, { pageWo: wo, ending });
+    }
+    function showStage(next, fresh) {
       const before = stage;
       stage = next;
+      status = fresh || status;
       q(".temsPlayLabel").textContent = stage === "mobility" ? "Start Mobility" : "Start Stationary";
       q(".temsEnd").hidden = stage !== "complete";
-      if (!changed || !before) return;  // first read on opening the page: no sound
-      if (stage === "mobility") { beep(1); toast("TEMS: stationary test done - drive to start mobility.", "ok", 8000); }
+      if (["stationary", "mobility", "complete"].includes(stage)) starting = false;
+      // Ended here with Submit / Discard / Suspend: not a test any more (Submit's reopen included)
+      // until Start Stationary begins a new run.
+      const ended = stage === "ended" ? status.ended || {} : null;
+      const note = q(".runNote");
+      note.hidden = !ended;
+      if (ended) {
+        const word = { submit: "submitted", discard: "discarded", suspend: "suspended" }[ended.as] || "ended";
+        const at = ended.at ? new Date(ended.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "";
+        // Submit is final; Discard / Suspend mean the WO gets tested again
+        const next = ended.as === "submit" ? "" : " - ready to test it again: press Start Stationary.";
+        note.innerHTML = `${icon(ended.as === "submit" ? "check" : ended.as === "discard" ? "x" : "pause", "sm")}<span><b>${esc(status.wo || wo || "Last run")}</b>: test ${word}${at ? ` ${esc(at)}` : ""}${next || "."}</span>`;
+        note.dataset.as = ended.as || "";
+      }
+      paintPop();
+      if (next === before || !before) return;  // first read on opening the page: no sound
+      if (stage === "mobility") { beep(1); toast("TEMS: stationary test done - start moving for mobility.", "ok", 8000); }
       if (stage === "complete") { beep(2); toast("TEMS: stationary and mobility done - Submit, Discard or Suspend.", "ok", 10000); }
     }
     async function pollStage(once = false) {
       if (!document.hidden) {
         try {
-          const now = await api("/api/tems/stage");
-          // The TEMS tab repeats its stage every 20 s; older than 2 min = it stopped watching (reloaded).
-          showStage(now.age != null && now.age < 120 ? now.stage : "");
+          const now = await api("/api/tems/status");
+          showStage(now.stage || "", now);
         } catch { /* server busy: keep what we show */ }
       }
-      if (!once) stageTimer = setTimeout(pollStage, 2000);
+      if (!once) { clearTimeout(stageTimer); stageTimer = setTimeout(pollStage, 3000); }
     }
     q(".temsEnd").addEventListener("click", (e) => {
       const button = e.target.closest("button[data-tems]");
-      if (!button || button.disabled) return;
-      const kind = button.dataset.tems;
-      if (kind === "discard" && !confirm(`Discard ${wo || "this WO"} in TEMS? Its test run is thrown away.`)) return;
-      temsJob({ action: kind, wo }, [...q(".temsEnd").querySelectorAll("button")]);
+      if (button && !button.disabled) pop.onAction(button.dataset.tems);
     });
 
     async function loadPhones() {
@@ -395,11 +467,15 @@ export default {
     }
 
     async function run(action, phone) {
-      if (busy) return;
-      busy = true;
+      const lane = phone || "desk";
+      if (lanes.has("desk") || lanes.has(lane) || (lane === "desk" && busy())) return;
+      lanes.add(lane);
       // Phones about to be tested show --.-- until their new result is in (never last time's speed).
-      pending = action === "fullTestAll" ? (info?.phones || []).filter((p) => p.connected).map((p) => p.name)
+      const mine = action === "fullTestAll" ? (info?.phones || []).filter((p) => p.connected).map((p) => p.name)
         : action === "fullTest" || action === "speedtest" ? [phone] : [];  // desk / airplane: no speed to wait for
+      pending = [...pending, ...mine];
+      if (action === "fullTestAll") testing = new Set(mine.slice(0, 1)); else mine.forEach((name) => testing.add(name));
+      const job = panelFor(lane);
       paintPhones();
       let seen = 0, linesShown = 0;
       const runWo = wo;
@@ -413,11 +489,13 @@ export default {
           if (!ordered && j.data?.order) {  // Test all: the server picked the order (NR phones first, then LTE)
             ordered = true;
             pending = j.data.order.filter((name) => pending.includes(name));
+            testing = new Set(pending.slice(0, 1));
             paintPhones();
           }
           if (results.length > seen) {  // a phone finished: show it now (Test all keeps going)
             results.slice(seen).forEach((x) => saveLast({ ...x, wo: runWo }));
             pending = pending.filter((name) => !results.some((r) => r.phone === name));
+            if (action === "fullTestAll") testing = new Set(pending.slice(0, 1));
             seen = results.length;
             paintPhones(); reloadRecord();
           }
@@ -427,7 +505,9 @@ export default {
       } catch (error) {
         toast(error.message, "bad", 8000);
       } finally {
-        busy = false; pending = [];
+        lanes.delete(lane);
+        pending = pending.filter((name) => !mine.includes(name));
+        mine.forEach((name) => testing.delete(name));
         loadPhones(); reloadRecord();
       }
     }
@@ -442,13 +522,274 @@ export default {
     loadPhones();
     if (params.get("wo")) box.set(params.get("wo"));
     else pickDefaultWo();
-    timer = setInterval(() => { if (!busy && !document.hidden) { loadPhones(); reloadRecord(); } }, 8000);
+    timer = setInterval(() => { if (!busy() && !document.hidden) { loadPhones(); reloadRecord(); } }, 8000);
     pollSignal();
     pollStage();
-    return () => { clearInterval(timer); clearTimeout(sigTimer); clearTimeout(stageTimer); temsMap.destroy(); };
+    return () => { clearInterval(timer); clearTimeout(sigTimer); clearTimeout(stageTimer); temsMap.destroy(); pop.destroy(); };
   },
 };
 
 function callout(text, kind) {
   return `<div class="callout ${kind}">${icon(kind === "info" ? "info" : "alert", "sm")}<div>${esc(text)}</div></div>`;
+}
+
+// ---------- the test pop-up ----------
+// One screen per stage of the TEMS run, read from TEMS (show(stage, status)). Hide keeps the test
+// running and leaves a small pill at the bottom; the next stage opens the pop-up again.
+const popSteps = [["stationary", "Stationary"], ["mobility", "Mobility"], ["complete", "Results"]];
+const popScreens = {
+  starting: { title: "Starting the stationary test", text: "Opening the WO in TEMS and pressing play. Stay with the car - this takes a moment.", step: 0, busy: true },
+  stationary: { title: "Stationary test running", text: "Stay where you are. TEMS is testing this spot - we'll tell you when to move.", step: 0, busy: true, count: "stationary", unit: "stationary point", map: true },
+  mobility: { title: "Time to move - mobility test", text: "Stationary is done. Drive the route; we'll let you know when it's complete.", step: 1, busy: true, count: "mobility", unit: "waypoint", move: true, map: true },
+  complete: { title: "Test complete", text: "Stationary and mobility are done. Choose what to do with this run.", step: 2, done: true },
+  submit: { title: "Submitting in TEMS", text: "Leave TEMS to it. Fill in the result below meanwhile - it saves as you change it.", step: 2, busy: true },
+  submitDone: { title: "Submitted in TEMS", text: "Submit was pressed in TEMS. Check the result below, then Close.", step: 2, done: true },
+  submitByHand: { title: "Marked as submitted", text: "You finished it in TEMS - marked done. Check the result below, then Close.", step: 2, done: true },
+  submitFailed: { title: "Submit got stuck", text: "The steps below show how far it got.", step: 2, bad: true },
+  "ending-suspend": { title: "Suspending the test", text: "Suspending in TEMS. You'll test this WO again with Start Stationary.", step: 2, busy: true },
+  "ending-discard": { title: "Discarding the test", text: "Discarding the run in TEMS. You'll test this WO again with Start Stationary.", step: 2, busy: true },
+  paused: { title: "Test paused in TEMS", text: "The run is paused. Resume it in TEMS (Control, then play) - this updates by itself.", step: -1 },
+  failed: { title: "TEMS stopped the run", text: "TEMS reports the run failed. Check the TEMS tab.", step: -1, bad: true },
+};
+const sinceKey = "kaamTestSince";
+
+function testPopup() {
+  const el = document.createElement("div");
+  el.className = "testPop hidden";
+  el.setAttribute("role", "dialog");
+  el.setAttribute("aria-live", "polite");
+  el.innerHTML = `
+    <div class="tpCard">
+      <div class="tpTop"><span class="tpKicker">TEMS test</span><span class="spacer"></span>
+        <button class="iconBtn sm tpHide" title="Hide - the test keeps running">${icon("x", "sm")}</button></div>
+      <div class="tpMapSlot" hidden></div>
+      <div class="tpVisual"><span class="tpRing"></span><span class="tpRing two"></span><span class="tpCore"></span></div>
+      <h2 class="tpTitle"></h2>
+      <p class="tpText"></p>
+      <div class="tpWo mono"></div>
+      <div class="tpProgress"><div class="tpBar"><i></i></div><span class="tpCount"></span></div>
+      <div class="tpSteps">${popSteps.map(([key, name], n) => `<span class="tpStep" data-step="${n}"><b>${n + 1}</b>${name}</span>`).join("")}</div>
+      <div class="tpSubmit" hidden>
+        <ol class="tpSubSteps"></ol>
+        <div class="tpFail" hidden>
+          <div class="tpFailText"></div>
+          <div class="tpAsk">
+            <b>I couldn't finish it.</b> If you finished it in TEMS yourself (Submit pressed there), I'll mark it submitted - done and dusted - so we move on to the next one.
+            <div class="tpAskBtns">
+              <button class="btn btnGreen" data-sub="done">${icon("check", "sm")}<span>Yes, I did it - mark done</span></button>
+              <button class="btn btnGhost" data-sub="later">${icon("clock", "sm")}<span>Not yet</span></button>
+            </div>
+          </div>
+        </div>
+        <div class="tpForm">
+          <div class="tpFormHead"><span class="sectionT">Result</span><span class="tpSaved hint"></span></div>
+          <div class="formGrid">
+            <div class="field"><label class="label">Total grids</label><input class="input tfTotal" inputmode="numeric"></div>
+            <div class="field"><label class="label">Grids attempted</label><div class="tfAtt"></div></div>
+            <div class="field"><label class="label">Grids skipped</label><div class="tfSkip"></div></div>
+          </div>
+          <div class="field"><label class="label">Status</label><div class="tfStatus"></div></div>
+          <div class="field"><label class="label">Remarks (optional)</label><textarea class="textarea tfRemarks" rows="2" placeholder="Saved when you click away"></textarea></div>
+        </div>
+      </div>
+      <div class="tpMeta"><span class="tpTimer"></span><span class="tpWorking"></span></div>
+      <div class="tpClose" hidden><button class="btn btnPrimary lg" data-sub="close">${icon("check", "sm")}<span>Close</span></button></div>
+      <div class="tpActions">
+        <button class="btn btnGreen lg" data-end="submit" title="Suspend, take the TEMS picture, reopen and play, then press Submit on the results page">${icon("check", "sm")}<span>Submit</span></button>
+        <button class="btn btnGhost lg" data-end="suspend" title="Suspend in TEMS (OK to its summary)">${icon("pause", "sm")}<span>Suspend</span></button>
+        <button class="btn btnDanger lg" data-end="discard" title="Discard the run in TEMS (asks first)">${icon("x", "sm")}<span>Discard</span></button>
+      </div>
+    </div>`;
+  const pill = document.createElement("button");
+  pill.className = "testPill hidden";
+  pill.title = "Show the test";
+  const $p = (sel) => el.querySelector(sel);
+  let current = "", currentKey = "", hiddenFor = "", tick = null, since = 0, timerOff = false;
+  // Stationary / mobility: the TEMS map, live, in a box (drag / pinch / zoom it), zoomed to the
+  // grid. Made when the test starts, gone (no more polling) once it isn't running.
+  let liveMap = null;
+  function mapFor(stage) {
+    const want = !!popScreens[stage]?.map;
+    if (want && !liveMap) {
+      liveMap = temsMapCard({ compact: true, fitTo: "grid", pan: { key: "kaamTemsPopPan", on: false } });
+      $p(".tpMapSlot").append(liveMap.el);
+    } else if (!want && liveMap) {
+      liveMap.destroy(); liveMap.el.remove(); liveMap = null;
+    }
+    $p(".tpMapSlot").hidden = !want;
+    el.classList.toggle("withMap", want);
+  }
+
+  // ----- Submit: the result form (same fields as End Ticket, saved on the WO as you change it) -----
+  const settings = store.settings || {};
+  const defaults = settings.defaults || { total: "1", attempted: "1", skipped: "0", status: "PASSED" };
+  const opposite = (v) => (v === "1" ? "0" : "1");
+  const att = seg([{ value: "0", label: "0" }, { value: "1", label: "1" }], defaults.attempted, (v) => { skip.set(opposite(v)); saveForm(); });
+  const skip = seg([{ value: "0", label: "0" }, { value: "1", label: "1" }], defaults.skipped, (v) => { att.set(opposite(v)); saveForm(); });
+  const statusSeg = seg((settings.statusOptions || ["PASSED", "SKIPPED", "FAILED"]).map((s) => ({ value: s, label: s })), defaults.status, (v) => {
+    const skipped = v === "SKIPPED";  // SKIPPED = attempted 0, skipped 1; PASSED / FAILED = 1, 0
+    att.set(skipped ? "0" : "1"); skip.set(skipped ? "1" : "0"); saveForm();
+  }, "statusSeg");
+  $p(".tfAtt").replaceWith(att.el); $p(".tfSkip").replaceWith(skip.el); $p(".tfStatus").replaceWith(statusSeg.el);
+  const total = $p(".tfTotal"), remarks = $p(".tfRemarks");
+  total.addEventListener("change", saveForm);    // when you leave the box
+  remarks.addEventListener("change", saveForm);
+  total.addEventListener("keydown", (e) => { if (e.key === "Enter") total.blur(); });
+  let formWo = "", formRecord = null, saving = Promise.resolve();
+  const savedHint = (text, color = "var(--faint)") => { $p(".tpSaved").textContent = text; $p(".tpSaved").style.color = color; };
+  const formFields = () => ({ total: total.value.trim(), attempted: att.get(), skipped: skip.get(), status: statusSeg.get(), remarks: remarks.value.trim() });
+  async function loadForm(forWo) {
+    if (forWo === formWo) return;
+    formWo = forWo; formRecord = null;
+    total.value = defaults.total; att.set(defaults.attempted); skip.set(defaults.skipped); statusSeg.set(defaults.status); remarks.value = "";
+    savedHint(forWo ? "Loading…" : "");
+    if (!forWo) return;
+    try {
+      const record = await api(`/api/records/${enc(forWo)}`);
+      if (formWo !== forWo) return;
+      formRecord = record;
+      const rf = record.reportFields || {};
+      if (record.totalGrids != null || record.status) {
+        total.value = rf.total ?? total.value; att.set(rf.attempted ?? att.get()); skip.set(rf.skipped ?? skip.get());
+        statusSeg.set(rf.status || statusSeg.get()); remarks.value = record.remarks || "";
+        savedHint("Loaded from Records - saves as you change it");
+      } else {
+        savedHint("Saves as you change it");
+        saveForm();  // nothing saved yet: the defaults shown go on the WO
+      }
+    } catch (error) {
+      if (formWo === forWo) savedHint(/not in records/i.test(error.message) ? "Not in Records - can't save here" : "Couldn't load the WO", "var(--amber)");
+    }
+  }
+  function saveForm() {
+    const forWo = formWo;
+    if (!forWo || !formRecord) { if (forWo) savedHint("Not in Records - can't save here", "var(--amber)"); return; }
+    savedHint("Saving…", "var(--muted)");
+    const want = formFields();
+    saving = saving.then(async () => {
+      try {
+        formRecord = await api(`/api/records/${enc(forWo)}`, { method: "PATCH", body: { ...want, source: "Live Testing" } });
+        if (formWo === forWo) savedHint(`Saved ${new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`, "var(--green)");
+        refreshState();
+      } catch (error) { savedHint("Not saved", "var(--red)"); toast(error.message, "bad"); }
+    });
+  }
+
+  // ----- Submit: its steps, where it got stuck, the question, Close -----
+  const stepIcon = { done: "check", working: "refresh", failed: "x" };
+  function paintSubmit(run, ending) {
+    const order = run?.order || ["suspend", "picture", "reopen", "play", "results", "submit"];
+    const labels = run?.labels || { suspend: "Suspend in TEMS", picture: "Picture of the WO", reopen: "Opened again", play: "Play pressed",
+      results: "Results showing Submit / Discard / Suspend", submit: "Submit pressed in TEMS" };
+    const steps = run?.steps || (ending ? { suspend: "working" } : {});
+    $p(".tpSubSteps").innerHTML = order.map((key) => {
+      const state = steps[key] || "";
+      const note = key === "picture" && run?.picture && state === "done" ? `<span class="hint mono">${esc(run.picture.split(/[\\/]/).pop())}</span>` : "";
+      return `<li class="${state || "todo"}"><span class="sIco">${stepIcon[state] ? icon(stepIcon[state], "sm") : ""}</span><span>${esc(labels[key] || key)}</span>${note}</li>`;
+    }).join("");
+    const failed = run?.state === "failed";
+    $p(".tpFail").hidden = !failed;
+    if (failed) {
+      const done = order.filter((k) => steps[k] === "done").map((k) => labels[k]);
+      $p(".tpFailText").innerHTML = `${icon("alert", "sm")}<div><b>Stuck at: ${esc(labels[run.failedAt] || run.failedAt || "?")}</b><br>${esc(run.error || "")}` +
+        `<br><span class="hint">Done before it: ${done.length ? esc(done.join(" · ")) : "nothing"}${run.picture ? "" : " · no picture saved"}</span></div>`;
+    }
+    $p(".tpClose").hidden = run?.state !== "done";
+  }
+  el.addEventListener("click", (e) => {
+    const button = e.target.closest("[data-sub]");
+    if (!button || button.disabled) return;
+    const forWo = el.dataset.submitWo || "";
+    if (button.dataset.sub === "done") { button.disabled = true; saving.then(() => api_.onSubmitDone(forWo)).finally(() => (button.disabled = false)); }
+    if (button.dataset.sub === "close") saving.then(() => api_.onSubmitClose(forWo));
+    if (button.dataset.sub === "later") $p(".tpHide").click();  // finish it in TEMS; the pill brings this back
+  });
+
+  const fmt = (ms) => { const s = Math.max(0, Math.floor(ms / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; };
+  function startedAt(key) {
+    // when we first saw this stage of this WO (kept across reloads, so the timer doesn't restart)
+    let seen = {};
+    try { seen = JSON.parse(localStorage.getItem(sinceKey) || "{}"); } catch { /* storage blocked */ }
+    if (!seen[key]) { seen = { [key]: Date.now() }; try { localStorage.setItem(sinceKey, JSON.stringify(seen)); } catch { /* storage blocked */ } }
+    return seen[key];
+  }
+  function paintTimer() {
+    const text = current === "complete" ? `Finished ${fmt(Date.now() - since)} ago` : `Running ${fmt(Date.now() - since)}`;
+    $p(".tpTimer").textContent = since && !timerOff ? text : "";
+    pill.querySelector(".pTime") && (pill.querySelector(".pTime").textContent = since ? fmt(Date.now() - since) : "");
+  }
+
+  const api_ = {
+    el, pill, onAction: () => {}, onSubmitDone: () => {}, onSubmitClose: () => {},
+    show(stage, status = {}, { pageWo = "", ending = "" } = {}) {
+      const run = stage === "submit" ? status.submit : null;
+      const submitState = stage !== "submit" ? "" : !run ? "running" : run.state === "done" ? (run.byHand ? "byHand" : "done") : run.state;
+      const screenName = { running: "submit", done: "submitDone", byHand: "submitByHand", failed: "submitFailed" }[submitState] || stage;
+      const screen = popScreens[screenName];
+      mapFor(stage);
+      $p(".tpSubmit").hidden = stage !== "submit";
+      el.classList.toggle("submitting", stage === "submit");
+      if (stage === "submit") {
+        const forWo = run?.wo || status.wo || pageWo || "";
+        el.dataset.submitWo = forWo;
+        loadForm(forWo);
+        paintSubmit(run, ending);
+      } else {
+        $p(".tpClose").hidden = true;
+      }
+      if (!screen) {  // idle / ready / closed / unknown: nothing running
+        current = ""; el.classList.add("hidden"); pill.classList.add("hidden"); clearInterval(tick); tick = null;
+        return;
+      }
+      const temsWo = (run && run.wo) || status.wo || pageWo || "";
+      const key = `${temsWo}|${stage}`;
+      if (stage !== current) { since = startedAt(key); $p(".tpWorking").textContent = ""; }
+      if (submitState && submitState !== "running") $p(".tpWorking").textContent = "";
+      current = stage;
+      currentKey = `${key}|${submitState}`;  // Submit done / stuck shows the pop-up again even if hidden
+      timerOff = !!submitState && submitState !== "running";
+      el.dataset.stage = stage;
+      $p(".tpTitle").textContent = screen.title;
+      $p(".tpText").textContent = stage === "failed" && status.error ? `${screen.text} (${status.error})` : screen.text;
+      $p(".tpWo").textContent = temsWo ? temsWo + (pageWo && temsWo !== pageWo && status.wo ? "  (picked here: " + pageWo + ")" : "") : "";
+      const count = screen.count ? status[screen.count] : null;
+      const hasCount = count && count.total;
+      $p(".tpProgress").hidden = !hasCount;
+      if (hasCount) {
+        $p(".tpBar i").style.width = `${Math.min(100, Math.round((count.done / count.total) * 100))}%`;
+        $p(".tpCount").textContent = `${count.done} of ${count.total} ${screen.unit}${count.total === 1 ? "" : "s"}`;
+      }
+      el.querySelectorAll(".tpStep").forEach((s) => {
+        const n = +s.dataset.step;
+        s.classList.toggle("done", screen.step > n || (!!screen.done && n <= screen.step));  // a real true / false:
+        s.classList.toggle("now", n === screen.step && !screen.done);                       // undefined would flip it
+      });
+      el.classList.toggle("busy", !!screen.busy);
+      el.classList.toggle("move", !!screen.move);
+      el.classList.toggle("finished", !!screen.done);
+      el.classList.toggle("bad", !!screen.bad);
+      $p(".tpActions").hidden = stage !== "complete";
+      el.querySelectorAll("[data-end]").forEach((b) => { b.disabled = !!ending; b.classList.toggle("working", b.dataset.end === ending); });
+      if (!ending && stage === "complete") $p(".tpWorking").textContent = "";
+      pill.innerHTML = `<span class="pDot"></span><span>${esc(screen.title)}</span><span class="pTime mono"></span>`;
+      pill.dataset.stage = stage;
+      const hidden = hiddenFor === currentKey;
+      el.classList.toggle("hidden", hidden);
+      pill.classList.toggle("hidden", !hidden);
+      paintTimer();
+      if (!tick) tick = setInterval(paintTimer, 1000);
+    },
+    working(line) { if (current) $p(".tpWorking").textContent = String(line).replace(/^\[[^\]]+\]\s*/, ""); },
+    destroy() { clearInterval(tick); liveMap?.destroy(); el.remove(); pill.remove(); },
+  };
+  $p(".tpHide").addEventListener("click", () => {
+    hiddenFor = currentKey;
+    el.classList.add("hidden"); pill.classList.remove("hidden");
+  });
+  pill.addEventListener("click", () => { hiddenFor = ""; el.classList.remove("hidden"); pill.classList.add("hidden"); });
+  el.addEventListener("click", (e) => {
+    const button = e.target.closest("[data-end]");
+    if (button && !button.disabled) api_.onAction(button.dataset.end);
+  });
+  return api_;
 }

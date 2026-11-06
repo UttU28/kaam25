@@ -8,7 +8,7 @@ const extensionVersion = chrome.runtime.getManifest().version;
 
 // Keep equal to "version" in manifest.json. Chrome can keep running an old saved copy of this
 // file after an update (seen across a Chrome restart); when it does, reload to get the new code.
-const backgroundBuild = "3.42";
+const backgroundBuild = "3.53";
 if (extensionVersion !== backgroundBuild) chrome.runtime.reload();
 
 // Sends to the app. If the app says our files changed on disk, reload to pick them up.
@@ -186,7 +186,7 @@ async function startWhatsappShare(message, triggerTab) {
     await chrome.windows.update(openTab.windowId, { focused: true });
     chrome.tabs.remove(triggerTab.id).catch(() => {});
     debugLog(`whatsapp: using the open WhatsApp tab (${openTab.discarded ? "asleep" : openTab.status})`, openTab);
-    await new Promise((resolve) => setTimeout(resolve, 800));
+    if (openTab.discarded || openTab.status !== "complete") await new Promise((resolve) => setTimeout(resolve, 800));
     if (!(await waitForTabLoaded(tabId, 120000))) {
       sendToBridge({ requestId: message.requestId, stage: "done", error: "The WhatsApp tab didn't finish loading." });
       return;
@@ -524,6 +524,13 @@ async function handleMessage(message, sender) {
       return true;
     case "jobState":
       return await getJob(sender.tab);
+    case "jobProgress": {
+      // A batch (End Tickets on WhatsApp) telling the app how far it is: every result so far.
+      const job = await getJob(sender.tab);
+      if (!job) return false;
+      sendToBridge({ requestId: job.requestId, stage: "progress", seq: Date.now(), ...(message.progress || {}) });
+      return true;
+    }
     case "stillWanted":
       // Right before Create / Submit / Send: check in with the app first (it hands over any
       // Stop you just pressed), then say whether this tab's job is still on.

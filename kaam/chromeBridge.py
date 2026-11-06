@@ -32,6 +32,7 @@ extensionManifest = appDir / "chromeExtension" / "manifest.json"
 
 pendingMessages = {}  # requestId -> latest message from the extension
 pendingFiles = {}     # requestId -> local files the extension may fetch for that request
+pendingItems = {}     # requestId -> extra JSON handed over with those files (a WhatsApp batch's WOs)
 messagesCondition = threading.Condition()
 bridgeServer = None
 bridgeError = None    # why the bridge couldn't start (e.g. the port is taken), for status displays
@@ -132,10 +133,13 @@ def setTemsStage(stage, wo=""):
     temsStage.update(stage=stage, wo=wo or temsStage.get("wo", ""), at=time.time())
 
 
-def registerFiles(requestId, paths):
-    """Let the extension fetch these files (and only these) for this request."""
+def registerFiles(requestId, paths, items=None):
+    """Let the extension fetch these files (and only these) for this request. items: extra JSON
+    handed over with them (a WhatsApp batch: each WO's caption and which files are its)."""
     with messagesCondition:
         pendingFiles[requestId] = [Path(p) for p in paths]
+        if items is not None:
+            pendingItems[requestId] = items
 
 
 class BridgeHandler(BaseHTTPRequestHandler):
@@ -181,6 +185,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         parts = self.path.strip("/").split("/")
         with messagesCondition:
             paths = pendingFiles.get(parts[1]) if len(parts) == 2 and parts[0] == "files" else None
+            items = pendingItems.get(parts[1]) if paths is not None else None
         if paths is None:
             self.sendJson({"error": "unknown request"}, 404)
             return
@@ -193,7 +198,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         except OSError as error:
             self.sendJson({"error": f"Couldn't read log files: {error}"}, 500)
             return
-        self.sendJson({"files": files})
+        self.sendJson({"files": files, **({"items": items} if items is not None else {})})
 
     def do_POST(self):
         if self.path != "/result":
@@ -291,32 +296,46 @@ def openInChrome(url):
     subprocess.Popen([findChrome(), f"--profile-directory={getLastUsedProfile()}", url])
 
 
-def waitForStage(requestId, stage, timeout):
-    """Wait until the extension reports `stage` (or 'done') for this request."""
+def waitForStage(requestId, stage, timeout, onProgress=None):
+    """Wait until the extension reports `stage` (or 'done') for this request. onProgress(message)
+    gets each "progress" report on the way (outside the lock)."""
     deadline = time.time() + timeout
-    with messagesCondition:
-        while time.time() < deadline:
-            raiseIfStopped()
+    lastSeq = None
+    while time.time() < deadline:
+        raiseIfStopped()
+        fresh = None
+        with messagesCondition:
             message = pendingMessages.get(requestId) or {}
             if message.get("stage") in (stage, "done"):
                 return message
-            messagesCondition.wait(min(1.0, deadline - time.time()))
+            if message.get("stage") == "progress" and message.get("seq") != lastSeq:
+                fresh = message
+            else:
+                messagesCondition.wait(max(0.05, min(1.0, deadline - time.time())))
+        if fresh:
+            lastSeq = fresh.get("seq")
+            if onProgress:
+                try:
+                    onProgress(fresh)
+                except Exception:
+                    pass  # showing progress must never break the run
     raiseIfStopped()
     return None
 
 
-def runInChrome(buildUrl, openUrl=openInChrome, startTimeout=25, timeout=70, timeoutMessage="Timed out."):
+def runInChrome(buildUrl, openUrl=openInChrome, startTimeout=25, timeout=70, timeoutMessage="Timed out.",
+                onProgress=None):
     """Open buildUrl(requestId) in Chrome and return the extension's final message.
 
     If the extension was out of date it reloads itself, so try once more."""
     try:
-        return runOnce(buildUrl, openUrl, startTimeout, timeout, timeoutMessage)
+        return runOnce(buildUrl, openUrl, startTimeout, timeout, timeoutMessage, onProgress)
     except ExtensionOutdatedError:
         time.sleep(3)  # give the extension time to reload
-        return runOnce(buildUrl, openUrl, startTimeout, timeout, timeoutMessage)
+        return runOnce(buildUrl, openUrl, startTimeout, timeout, timeoutMessage, onProgress)
 
 
-def runOnce(buildUrl, openUrl, startTimeout, timeout, timeoutMessage):
+def runOnce(buildUrl, openUrl, startTimeout, timeout, timeoutMessage, onProgress=None):
     raiseIfStopped()  # Stop pressed between steps: don't open anything new
     startBridge()
     requestId = secrets.token_hex(8)
@@ -331,7 +350,7 @@ def runOnce(buildUrl, openUrl, startTimeout, timeout, timeoutMessage):
             raise ChromeBridgeError(extensionOldMessage)  # too old to update itself
         if isExtensionOutdated(started):
             raise ExtensionOutdatedError("Extension was out of date; it reloaded itself.")
-        message = waitForStage(requestId, "done", timeout)
+        message = waitForStage(requestId, "done", timeout, onProgress)
         if not message or message.get("stage") != "done":
             raise ChromeBridgeError(timeoutMessage)
         return message
@@ -339,3 +358,4 @@ def runOnce(buildUrl, openUrl, startTimeout, timeout, timeoutMessage):
         with messagesCondition:
             pendingMessages.pop(requestId, None)
             pendingFiles.pop(requestId, None)
+            pendingItems.pop(requestId, None)

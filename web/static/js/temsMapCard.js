@@ -18,7 +18,7 @@ const routeStyle = { color: "#1c2bff", width: 4, target: "#1ca8ff", states: ["#b
 const trackStyle = { color: "#1ca8ff", width: 2, previous: "#004f80", previousWidth: 2 };
 const carScale = 0.5;   // TEMS draws its 96 px car image at half size
 const osrmUrl = "https://router.project-osrm.org";
-const panKey = "kaamTemsAutoPan";
+const autoPanKey = "kaamTemsAutoPan";
 // TEMS's flag shape (start: green, goal: checkered).
 const flagPath = "M26.5,4.8c-0.3-0.2-0.7-0.2-1,0c-3.5,2.2-6.1,0.8-9-0.8c-3-1.6-6.5-3.4-11-0.7C5.2,3.6,5,3.9,5,4.3V18v0.3V29" +
   "c0,0.6,0.4,1,1,1s1-0.4,1-1V18.9c3.3-1.8,5.7-0.5,8.5,1c1.9,1,4,2.1,6.4,2.1c1.4,0,3-0.4,4.6-1.4c0.3-0.2,0.5-0.5,0.5-0.9v-14" +
@@ -34,9 +34,13 @@ const withAlpha = (hex, a) => {
 const carImage = new Image();
 carImage.src = "/static/img/temsCar.png";
 
-export function temsMapCard() {
+// Options (the test pop-up's map box): compact - no title row, fitTo "grid" - Zoom to fit frames
+// the grid cells alone (route and car only when there's no grid), pan - auto pan's start value and
+// its own saved key.
+export function temsMapCard({ compact = false, fitTo = "all", pan = null } = {}) {
+  const panKey = pan?.key || autoPanKey;
   const el = document.createElement("div");
-  el.className = "card temsMap";
+  el.className = `card temsMap${compact ? " compact" : ""}`;
   el.innerHTML = `
     <div class="tmHead">
       <span class="liveDot"></span><b>TEMS map</b>
@@ -46,7 +50,7 @@ export function temsMapCard() {
     </div>
     <div class="tmTools">
       <button class="btn btnGhost sm tmPan" title="Keep the car in view">${icon("check", "sm")}<span>Auto pan</span></button>
-      <button class="btn btnGhost sm tmFit" title="Zoom to the grid, route and car">${icon("refresh", "sm")}<span>Zoom to fit</span></button>
+      <button class="btn btnGhost sm tmFit" title="${fitTo === "grid" ? "Zoom to the grid" : "Zoom to the grid, route and car"}">${icon("refresh", "sm")}<span>${fitTo === "grid" ? "Zoom to grid" : "Zoom to fit"}</span></button>
       <button class="btn btnGhost sm tmCenter" title="Center on the car">${icon("navigate", "sm")}<span>Center</span></button>
       <span class="tmKey mono"></span>
     </div>
@@ -57,26 +61,34 @@ export function temsMapCard() {
   let map = null, L = null, overlay = null, timer = null, dead = false, fitted = false;
   let data = null, track = [], previousTrack = [], roadRoute = null, routeKey = "";
   let car = null, carPrev = null, heading = 0;
-  let autoPan = lsGet(panKey) !== "0";
+  const savedPan = lsGet(panKey);
+  let autoPan = savedPan == null ? (pan?.on ?? true) : savedPan !== "0";
   const paintPan = () => panBtn.classList.toggle("on", autoPan);
   paintPan();
   panBtn.addEventListener("click", () => {
     autoPan = !autoPan; lsSet(panKey, autoPan ? "1" : "0"); paintPan();
     if (autoPan && car) map?.panTo(car);
   });
-  q(".tmFit").addEventListener("click", () => fit());
+  let touched = false;  // you moved / zoomed the map by hand
+  q(".tmFit").addEventListener("click", () => { touched = false; fit(); });
+  for (const type of ["pointerdown", "wheel", "touchstart"]) q(".tmMap").addEventListener(type, () => { touched = true; }, { passive: true });
   q(".tmCenter").addEventListener("click", () => { if (car) map?.setView(car, Math.max(map.getZoom(), 16)); });
 
   function say(text) { msg.textContent = text; msg.classList.toggle("hidden", !text); }
 
   function fit() {
     if (!map || !data) return;
-    const points = [];
+    const size = map.getSize();
+    if (!size.x || !size.y) return;  // not on screen yet: fitted once it has a size
+    let points = [];
     for (const c of data.cells) points.push(...c.corners);
-    for (const w of data.route) if (w.at) points.push(w.at);
-    if (car) points.push(car);
+    if (fitTo !== "grid" || !points.length) {
+      for (const w of data.route) if (w.at) points.push(w.at);
+      if (car) points.push(car);
+    }
     if (!points.length) return;
     if (points.length === 1) map.setView(points[0], 17);
+    else if (fitTo === "grid") map.fitBounds(L.latLngBounds(points), { padding: [12, 12], maxZoom: 19, animate: false });
     else map.fitBounds(L.latLngBounds(points), { padding: [30, 30], maxZoom: 18 });
   }
 
@@ -323,7 +335,16 @@ export function temsMapCard() {
     overlay = new Overlay().addTo(map);
     // Dragging the map pauses auto pan until you press it again (TEMS does the same).
     map.on("dragstart", () => { if (autoPan) { autoPan = false; lsSet(panKey, "0"); paintPan(); } });
-    new ResizeObserver(() => map && map.invalidateSize()).observe(q(".tmMap"));
+    // A new size (shown after being hidden, window turned...): zoomed to fit again - unless you've
+    // moved or zoomed the map yourself (Zoom to fit / grid hands it back).
+    let wasEmpty = true;
+    new ResizeObserver(() => {
+      if (!map) return;
+      map.invalidateSize();
+      const size = map.getSize(), empty = !size.x || !size.y;
+      if (!empty && data && (wasEmpty || !touched)) fit();
+      wasEmpty = empty;
+    }).observe(q(".tmMap"));
     poll();
   }).catch((error) => say(error.message));
 

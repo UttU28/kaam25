@@ -14,11 +14,15 @@ import urllib.parse
 from .chromeBridge import ChromeBridgeError, bridgePort, openInChrome, runInChrome
 from .config import temsProject, temsUrl  # from .env (TEMS_*), with defaults
 
-actions = ("find", "go", "test", "play", "openWo", "suspend", "discard", "submit", "listWos")
+actions = ("find", "go", "test", "play", "openWo", "suspend", "discard", "submit", "listWos", "results", "cloudLogin")
 # openWo  - Start Stationary when the WO isn't open: Assign -> the WO -> Open.
 # suspend / discard - on TEMS's finished-test page: Suspend (OK the "summary created") / Discard (Yes).
-# submit  - for now: Chrome full window, Suspend, the WO's details on Assign scrolled to the bottom,
-#           a picture of the page (returned as "screenshot"), Open it again, Cancel the stationary test.
+# submit  - Chrome full window, Suspend, the WO's details on Assign scrolled to the bottom, a picture
+#           of the page (returned as "screenshot"), Open it again (prompts get OK).
+# results - Submit's last step: open Results; Submit / Discard / Suspend not showing -> reload TEMS and
+#           look again. Showing -> press Submit (OK its confirm). ("found", "where", "submitted")
+# cloudLogin - TEMS says it isn't connected to TEMS Cloud: Cloud tab, Log in, back to Control.
+#           (play does the same by itself when its button is greyed out and the page says so.)
 # listWos - the plan check: every WO name in the Cloud project and on Assign ("cloudNames", "assignNames").
 
 
@@ -41,7 +45,7 @@ def runTems(action, wo="", cloudWo="", assignWo="", project=temsProject, url=tem
         timeoutMessage="TEMS didn't finish. Check the TEMS tab and its login window.",
     )
     keys = ("ok", "summary", "error", "found", "notFound", "reserved", "opened", "mapShown", "suggestions", "matchedWo",
-            "played", "controlShown", "screenshot", "cloudNames", "assignNames")
+            "played", "controlShown", "cloudLogin", "screenshot", "cloudNames", "assignNames", "where", "submitted", "stepsDone")
     result = {key: message.get(key) for key in keys if key in message}
     if not result.get("ok") and not result.get("error"):
         result["error"] = "TEMS didn't say what happened. Check the TEMS tab."

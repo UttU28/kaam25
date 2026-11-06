@@ -43,6 +43,7 @@ const paths = {
   settings: '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>',
   copy: '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
   navigate: '<path d="m3 11 19-9-9 19-2-8-8-2z"/>',
+  wifi: '<path d="M2 8.8a15 15 0 0 1 20 0"/><path d="M5 12.5a10 10 0 0 1 14 0"/><path d="M8.5 16.1a5 5 0 0 1 7 0"/><circle cx="12" cy="19.5" r="1"/>',
   qr: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM20 14v1M14 20h1M17 17h4v4h-4"/>',
   // the WhatsApp logo (filled, in the text colour)
   whatsapp: '<path fill="currentColor" stroke="none" d="M17.47 14.38c-.3-.15-1.76-.87-2.03-.97-.27-.1-.47-.15-.67.15-.2.3-.77.97-.94 1.16-.17.2-.35.22-.64.07-.3-.15-1.26-.46-2.39-1.47-.88-.79-1.48-1.76-1.65-2.06-.17-.3-.02-.46.13-.6.13-.14.3-.35.45-.52.15-.17.2-.3.3-.5.1-.2.05-.37-.03-.52-.07-.15-.67-1.61-.92-2.2-.24-.58-.49-.5-.67-.51h-.57c-.2 0-.52.07-.79.37-.27.3-1.04 1.02-1.04 2.48 0 1.46 1.07 2.88 1.21 3.07.15.2 2.1 3.2 5.08 4.49.71.31 1.26.49 1.7.63.71.22 1.36.19 1.87.12.57-.09 1.76-.72 2.01-1.41.25-.7.25-1.29.17-1.41-.07-.13-.27-.2-.57-.35m-5.42 7.4h-.01a9.87 9.87 0 0 1-5.03-1.38l-.36-.21-3.74.98 1-3.65-.24-.37a9.86 9.86 0 0 1-1.51-5.26c0-5.45 4.44-9.88 9.89-9.88 2.64 0 5.12 1.03 6.99 2.9a9.83 9.83 0 0 1 2.89 6.99c0 5.45-4.44 9.88-9.88 9.88m8.41-18.3A11.82 11.82 0 0 0 12.05 0C5.5 0 .16 5.34.16 11.89c0 2.1.55 4.14 1.59 5.95L.06 24l6.31-1.65a11.88 11.88 0 0 0 5.68 1.45h.01c6.55 0 11.89-5.34 11.89-11.89a11.82 11.82 0 0 0-3.48-8.41z"/>',
@@ -167,7 +168,31 @@ export async function copyText(text, html = "") {
       return true;
     } catch { /* blocked: try the old way */ }
   }
-  return legacyCopy(text, html);
+  return (html && tableCopy(html)) || legacyCopy(text, html);
+}
+// Not a secure page (the tablet opens the app at http://<PC IP>:5000): no clipboard API. A table is
+// put on the page, selected and copied like any web table, so the tablet keeps it as a table
+// (rows and cells) for Excel - its own copy, not data set from a script, which tablets drop.
+function tableCopy(html) {
+  const box = document.createElement("div");
+  box.contentEditable = "true";
+  box.innerHTML = html;
+  box.style.cssText = "position:fixed;top:0;left:0;max-width:2px;max-height:2px;overflow:hidden;opacity:0.01;" +
+    "background:#fff;color:#000;font:14px Calibri,Arial,sans-serif;z-index:-1";
+  box.querySelectorAll("td, th").forEach((cell) => { cell.style.border = "1px solid #bbb"; cell.style.padding = "2px 6px"; });
+  const before = document.activeElement;
+  document.body.append(box);
+  const selection = window.getSelection();
+  const range = document.createRange();
+  range.selectNodeContents(box);
+  selection.removeAllRanges();
+  selection.addRange(range);
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch { ok = false; }
+  selection.removeAllRanges();
+  box.remove();
+  if (before && before.focus) before.focus({ preventScroll: true });
+  return ok;
 }
 function legacyCopy(text, html) {
   const onCopy = (event) => {

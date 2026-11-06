@@ -1,7 +1,7 @@
 // End: find + verify the ticket (cloud) or skip that (local), copy GridSummary, upload EQ3/EQ6,
 // build the report, save it, share it on WhatsApp, mark the ticket done.
 import { $, api, copyText, copyWithFlash, enc, esc, flash, formatReport, icon, modal, onDataChange, refreshState, setWhatsappSend, store, toast } from "../core.js";
-import { jobPanel, seg, switchEl, woBox } from "../components.js";
+import { jobPanel, redoBox, seg, switchEl, woBox } from "../components.js";
 
 export default {
   title: "End Ticket",
@@ -28,6 +28,7 @@ export default {
               </div>
             </div>
             <div class="msg"></div>
+            <div class="redoSlot"></div>
             <div class="jobSlot"></div>
             <div class="field">
               <label class="label">EQ Job IDs</label>
@@ -90,7 +91,16 @@ export default {
       </div>`;
 
     const q = (s) => $(s, root);
+    const redo = redoBox({ what: "ended", onRedo: (wos) => runAll(wos), onLater: async (forWo) => {
+      try {
+        await api(`/api/records/${enc(forWo)}/later`, { body: { kind: "end" } });
+        toast(`${forWo}: put off - it's in Records (End later) to pick up when you're ready.`, "ok", 6000);
+        refreshState();
+      } catch (error) { toast(error.message, "bad"); }
+      loadRedo();
+    } });
     const job = jobPanel(); q(".jobSlot").replaceWith(job.el);
+    q(".redoSlot").replaceWith(redo.el);
     const msg = (text, kind = "info") => { q(".msg").innerHTML = text ? `<div class="callout ${kind}">${icon(kind === "ok" ? "check" : kind === "info" ? "info" : "alert", "sm")}<div>${esc(text)}</div></div>` : ""; };
 
     const box = woBox({
@@ -181,6 +191,7 @@ export default {
       const run = q(".run");
       run.innerHTML = isLocal() ? `${icon("upload", "sm")}<span>Upload</span>` : `${icon("check", "sm")}<span>End Ticket</span>`;
       q(".endAll").disabled = busy;
+      redo.disable(busy);
       run.disabled = busy || !f.wo;
       if (!f.wo) hint("");
       else if (!record) hint("Not in Records yet", "var(--amber)");
@@ -280,27 +291,38 @@ export default {
 
     q(".run").addEventListener("click", run);
 
-    // ----- End Tickets: every WO in Today's open, uploads first, then the WhatsApp shares -----
-    async function runAll() {
+    // ----- Needs redo: the WOs End Tickets (or End Ticket) stopped on - which step and why -----
+    async function loadRedo() {
+      try {
+        const open = await api("/api/end/open");
+        redo.set(open.filter((r) => r.endProblem?.step && !r.endLater).map((r) => ({ wo: r.wo, ...r.endProblem })));
+      } catch { /* keep what's shown */ }
+    }
+
+    // ----- End Tickets: every WO in Today's open (or just `only`: Redo), uploads first, then WhatsApp -----
+    async function runAll(only) {
       if (busy) return;
       let open = [];
       try { open = await api("/api/end/open"); } catch (error) { msg(error.message, "bad"); return; }
+      if (Array.isArray(only)) open = open.filter((r) => only.includes(r.wo));
+      else open = open.filter((r) => !r.endLater);  // put off with Do later
       if (!open.length) { msg("Nothing to end - no open WO has its result file yet.", "info"); return; }
       const list = open.slice().sort((a, b) => (a.startedAt || "").localeCompare(b.startedAt || ""));
-      const sendText = wa.get() ? "and sends each one on WhatsApp" : "and gets each one ready on WhatsApp (Send OFF: you press Send)";
+      const sendText = wa.get() ? "sends each one on WhatsApp" : "gets each one ready on WhatsApp (Send OFF: you press Send)";
       const ok = await modal({
-        title: `End ${list.length} tickets?`,
+        title: Array.isArray(only) ? `Redo ${list.length === 1 ? list[0].wo : `${list.length} tickets`}?` : `End ${list.length} tickets?`,
         body: `<p>Uploads everything for each WO first (ticket check, GridSummary, EQ uploads), then ${sendText} in
-          <b>${esc(settings.whatsappGroup || "the group")}</b>, one by one - only the WOs that ended fully and weren't shared yet.
+          <b>${esc(settings.whatsappGroup || "the group")}</b> - only the WOs whose every upload worked and weren't shared yet.
+          A WO that stops at any step isn't shared and isn't marked ended: it's listed under Needs redo.
           ${settings.whatsappWoGroup ? `Then one message to <b>${esc(settings.whatsappWoGroup)}</b> with "&lt;WO&gt; - Done" for all of them.` : ""}</p>
           <ol style="margin:8px 0 0 18px">${list.map((r) => `<li class="mono">${esc(r.wo)}</li>`).join("")}</ol>`,
-        buttons: [{ label: "Cancel", value: false }, { label: `End ${list.length} tickets`, value: true, cls: "btnGreen" }],
+        buttons: [{ label: "Cancel", value: false }, { label: Array.isArray(only) ? "Redo" : `End ${list.length} tickets`, value: true, cls: "btnGreen" }],
       });
       if (!ok) return;
       busy = true; update();
       msg(`Ending ${list.length} tickets - uploads first, then WhatsApp…`, "info");
       try {
-        const { job: started } = await api("/api/end/runAll", { body: { send: wa.get() } });
+        const { job: started } = await api("/api/end/runAll", { body: { send: wa.get(), ...(Array.isArray(only) ? { wos: list.map((r) => r.wo) } : {}) } });
         const done = await job.run(started);
         if (done.state === "done") msg(done.result.summary, done.result.ok ? "ok" : "warn");
         else msg(done.state === "stopped" ? "Stopped by you." : done.error || "Stopped.", "bad");
@@ -309,10 +331,10 @@ export default {
       } finally {
         busy = false;
         box.set(""); record = null; shownKey = ""; loadedKey = null;
-        await refreshState(); box.refreshPicker(); update();
+        await refreshState(); box.refreshPicker(); update(); loadRedo();
       }
     }
-    q(".endAll").addEventListener("click", runAll);
+    q(".endAll").addEventListener("click", () => runAll());
     q(".saveEq").addEventListener("click", async (e) => {
       try {
         const r = await api("/api/end/eq", { body: { wo: box.get(), eq3: inputs.eq3.value, eq6: inputs.eq6.value } });
@@ -451,6 +473,7 @@ export default {
       }).catch(() => {});
     }
     setTimeout(() => box.focus(), 50);
+    loadRedo();
 
     // ----- live: count from the shared state; the record (and an open list) when data changes -----
     const paintCount = (state) => {
@@ -464,6 +487,7 @@ export default {
     const offCount = store.on(paintCount);
     const offData = onDataChange(async () => {
       box.refreshPicker();
+      if (!busy) loadRedo();
       if (busy || !box.get()) return;
       const before = JSON.stringify(savedStatus());
       const untouched = JSON.stringify(statusFields()) === before;  // form shows what was saved

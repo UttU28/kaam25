@@ -14,10 +14,15 @@
   const maxLoginClicks = 2;
 
   const debugLog = (text) => chrome.runtime.sendMessage({ type: "log", text: `tems: ${text}` }).catch(() => {});
+  // Submit's steps done so far (suspend, picture, reopen) and its picture: sent with the result
+  // also when a later step fails, so the app can say where it got stuck and keep the picture.
+  const stepsDone = [];
+  let shotTaken = null;
   const finish = (result) => {
-    debugLog(`finished: ${JSON.stringify(result)}`);
+    debugLog(`finished: ${JSON.stringify({ ...result, screenshot: result.screenshot ? "(picture)" : undefined })}`);
     window.kaamTemsRunning = null;
-    chrome.runtime.sendMessage({ type: "jobDone", result });
+    const extra = { stepsDone: [...stepsDone], ...(shotTaken && !result.screenshot ? { screenshot: shotTaken } : {}) };
+    chrome.runtime.sendMessage({ type: "jobDone", result: { ...extra, ...result } });
   };
 
   // ---------- helpers ----------
@@ -260,6 +265,23 @@
   // Only used to see when the list stops changing.
   const assignmentCount = () => (textOf(content()).match(/\b(In Progress|Planned|Completed)\b/g) || []).length;
 
+  // TEMS not connected to TEMS Cloud (then play can't start): the Control page's status line under
+  // the WO name, the tooltips / labels on its buttons, TEMS pop-ups and any connection badge.
+  const cloudOfflinePattern = /\boffline\b|not\s+connected|no\s+(cloud\s+|internet\s+|network\s+)?connection|disconnected|connection\s+(lost|failed|error|refused)|(cloud|server)\s+(is\s+)?(unavailable|unreachable|not\s+available|not\s+reachable)|not\s+(logged|signed)\s+in|please\s+log\s*in|log\s*in\s+to\s+tems\s+cloud|session\s+(has\s+)?expired|unauthori[sz]ed|token\s+(has\s+)?expired|no\s+internet/i;
+  function cloudTrouble() {
+    const texts = [];
+    const add = (text) => { text = String(text || "").trim(); if (text) texts.push(text); };
+    document.querySelectorAll('[class*="work-order-state"], [class*="overview-container"], [class*="UserNotification_notification-body"], [class*="offline" i], [class*="connection" i], [class*="CloudStatus"]')
+      .forEach((el) => { if (isVisible(el)) add(textOf(el)); });
+    document.querySelectorAll('[class*="WorkOrderControl_container"] [title], [class*="WorkOrderControl_container"] img[alt]')
+      .forEach((el) => { add(el.getAttribute("title")); add(el.getAttribute("alt")); });
+    for (const text of texts) {
+      const hit = text.match(cloudOfflinePattern);
+      if (hit) return (text.split("\n").find((line) => cloudOfflinePattern.test(line)) || hit[0]).trim().slice(0, 140);
+    }
+    return "";
+  }
+
   // Live Testing's Start ticket: Control page, then its play button - only when the app says TEMS
   // has the WO Validated / Paused (canPlay); while it runs, the same button would pause it.
   const playOnControl = async () => {
@@ -272,15 +294,37 @@
       if (!(await waitFor(() => isSelected(menuButton("Control")), 3000))) await realClick(menuButton("Control") || control);
     }
     const controlShown = !!(await waitFor(() => isSelected(menuButton("Control")), 5000));
+    const openControl = async () => {
+      const button = await waitFor(() => menuButton("Control"), 10000);
+      if (button && !isSelected(button)) await clickAndWait(button, () => isSelected(menuButton("Control")));
+      await sleep(1000);
+    };
     const playButton = () => {
       const box = [...document.querySelectorAll('[class*="WorkOrderControl_container"]')].find(isVisible);
       const buttons = box ? [...box.querySelectorAll('[class*="WorkOrderControl_button"]')].filter(isVisible) : [];
       const main = buttons[buttons.length - 1];  // an error button, if any, comes first
       return main ? main.closest('button, [role="button"]') || main : null;
     };
-    const button = await waitFor(playButton, 10000);
+    let button = await waitFor(playButton, 10000);
     if (!button) return finish({ ok: false, controlShown, error: "TEMS Control is open, but its play button isn't there (no WO open?)." });
     watchNotifications();  // the stationary-test prompt comes later, also when it was already running
+    // Play can't be pressed: is it because TEMS isn't connected to TEMS Cloud? Then Cloud -> Log in,
+    // back to Control, and press play once it can be (the app tries again when it wasn't ready yet).
+    let cloudNote = "";
+    const trouble = !canPlay || !isEnabled(button) ? cloudTrouble() : "";
+    if (trouble) {
+      debugLog(`play blocked, TEMS says: "${trouble}" - logging in to TEMS Cloud`);
+      const state = await cloudLogin();
+      cloudNote = `TEMS said "${trouble}" - ${state === "out" ? "logged in to TEMS Cloud" : "TEMS Cloud was logged in"}, back on Control`;
+      await openControl();
+      const ready = canPlay ? await waitFor(() => { const b = playButton(); return b && isEnabled(b) ? b : null; }, 45000, 500) : null;
+      if (!ready) {
+        const still = cloudTrouble();
+        return finish({ ok: true, controlShown: true, played: false, cloudLogin: true,
+          summary: `TEMS: ${cloudNote}${still ? ` - it still says "${still}"` : ""}; play ${canPlay ? "is still greyed out" : "isn't ready yet"}, not pressed.` });
+      }
+      button = ready;
+    }
     if (!canPlay) return finish({ ok: true, controlShown, played: false, summary: "TEMS Control is open - play isn't ready yet, so it wasn't pressed." });
     if (!isEnabled(button)) return finish({ ok: true, controlShown, played: false, summary: "TEMS Control is open, but its play button is greyed out - not pressed." });
     debugLog("pressing play on Control");
@@ -294,7 +338,8 @@
       await waitFor(() => !notificationButton(/do not attempt to adjust this device/i, /^i understand$/i), 4000);
     }
     window.kaamPlaying = false;
-    finish({ ok: true, controlShown, played: true, summary: `TEMS: play pressed on Control${confirm ? " (I understand)" : ""}.` });
+    finish({ ok: true, controlShown, played: true, cloudLogin: !!cloudNote,
+      summary: `TEMS: ${cloudNote ? `${cloudNote}, ` : ""}play pressed on Control${confirm ? " (I understand)" : ""}.` });
   };
 
   // TEMS pop-ups (UserNotification): the button labelled `label` in a notification whose text
@@ -342,19 +387,15 @@
   // no job is running by then, so no debugger banner):
   //  - the driving warning -> I understand
   //  - "Stopped in the target grid cell ... start the stationary test?" -> OK
-  //    (Cancel instead for a few minutes after Submit reopened the WO: no new stationary test)
   //  - "Low UE NR RSRP" / "Good RSRP" -> OK
   //  - the stage (above), reported to the app
   function watchNotifications(hours = 8) {
     window.kaamNotifyUntil = Date.now() + hours * 3600000;
     if (window.kaamNotifyWatch) return;  // already watching: just keep it on longer
-    const cancelStationary = () => (window.kaamCancelStationaryUntil || 0) > Date.now();
     const answers = [
       { text: /do not attempt to adjust this device/i, label: () => /^i understand$/i, what: () => "driving warning: I understand",
         skip: () => window.kaamPlaying },  // the play step clicks this one itself
-      { text: /start the stationary test/i, label: () => (cancelStationary() ? /^cancel$/i : /^ok$/i),
-        what: () => (cancelStationary() ? "stationary test: Cancel (after Submit)" : "stationary test: OK"),
-        after: () => { if (cancelStationary()) window.kaamStationaryCancelled = Date.now(); } },
+      { text: /start the stationary test/i, label: () => /^ok$/i, what: () => "stationary test: OK" },
       { text: /low ue nr rsrp|change the stationary location/i, label: () => /^ok$/i, what: () => "Low UE NR RSRP: OK" },
       { text: /good rsrp|this location is good/i, label: () => /^ok$/i, what: () => "Good RSRP: OK" },
     ];
@@ -401,6 +442,35 @@
         await sleep(800);
       }
     };
+    // TEMS Cloud logged in: the Cloud tab, and Log in when it asks (the popup signs in with Chrome's
+    // saved password). Returns "in" (was logged in) or "out" (logged in now); throws when it can't.
+    const cloudLogin = async () => {
+      const cloud = await waitFor(() => menuButton("Cloud"), appWaitMs);
+      if (!cloud) throw new Problem(`TEMS Paragon didn't load at ${location.origin}. Is TEMS Paragon running?`);
+      if (!isSelected(cloud)) {
+        debugLog("clicking Cloud");
+        cloud.click();
+        if (!(await waitFor(() => isSelected(menuButton("Cloud")), 3000))) await realClick(menuButton("Cloud") || cloud);
+      }
+      const state = await waitFor(() => (isLoggedIn() ? "in" : loginButton() ? "out" : null), stateWaitMs);
+      if (!state) throw new Problem("The TEMS Cloud page didn't show its assignments or a Log in button. Check the TEMS tab.");
+      if (state === "out") {
+        let clicks = 0, clickedAt = 0;
+        const end = Date.now() + loginWaitMs;
+        while (Date.now() < end && !isLoggedIn()) {
+          const button = loginButton();
+          if (button && clicks < maxLoginClicks && (!clickedAt || Date.now() - clickedAt > reclickAfterMs)) {
+            clicks += 1; clickedAt = Date.now();
+            debugLog(`clicking Log in (${clicks}/${maxLoginClicks})`);
+            await realClick(button);
+          }
+          await sleep(700);
+        }
+        if (!isLoggedIn()) throw new Problem("Still not logged in to TEMS Cloud. Finish the login in its popup window, then try again.");
+        debugLog("logged in to TEMS Cloud");
+      }
+      return state;
+    };
     const openProject = async () => {
       await goCloud();
       if (inProject(project)) return;
@@ -439,13 +509,21 @@
       !el.closest("li") && [...el.querySelectorAll("img")].some((img) => /refresh|reload|sync|update/i.test(img.alt || "")));
     // Looks for `name` on Assign for up to waitMs, pressing refresh now and then (a just-reserved WO
     // can take a moment to show up there).
-    const assignRowFor = async (name, waitMs) => {
+    const assignRowFor = async (name, waitMs, loginChecked = false) => {
       await goAssign();
       const end = Date.now() + waitMs;
       let refreshedAt = Date.now();
       for (;;) {
         const row = await findRowScrolling(name, findAssignRow);
-        if (row || Date.now() > end) {
+        const timeUp = Date.now() >= end;
+        // Logged out of TEMS Cloud shows up as the WO missing (or Assign asking to log in): check the
+        // login once - logged out -> log in and look again.
+        if (!row && !loginChecked && (cloudTrouble() || timeUp)) {
+          if (await loggedInAgain(`${name} not on Assign`)) return assignRowFor(name, waitMs, true);
+          loginChecked = true;
+          await goAssign();
+        }
+        if (row || timeUp) {
           if (!row) debugLog(`${name} not on Assign - ${describeList()}`);
           return row;
         }
@@ -457,6 +535,28 @@
         }
         await sleep(1500);
       }
+    };
+    // Was TEMS Cloud logged out? Cloud tab: logged out -> Log in (Chrome's saved password). True when it
+    // had to log in (so the step that needed it is tried again); false when it was logged in already.
+    const loggedInAgain = async (why) => {
+      debugLog(`${why} - checking the TEMS Cloud login`);
+      const state = await cloudLogin();
+      if (state === "out") debugLog("was logged out of TEMS Cloud - logged in again");
+      return state === "out";
+    };
+    // The WO's Open button on Assign; greyed out -> check the Cloud login, logged out -> log in, open
+    // the WO's details again and take the button from there.
+    const openButtonWithLogin = async (name, waitMs) => {
+      let button = await waitFor(() => detailsButton(/^(open|start)$/i), waitMs);
+      if (button && isEnabled(button)) return button;
+      if (await loggedInAgain(`${name}: Open ${button ? "greyed out" : "missing"}`)) {
+        const row = await assignRowFor(name, 20000, true);
+        if (row) {
+          await openAssignDetails(name, row);
+          button = await waitFor(() => detailsButton(/^(open|start)$/i), waitMs);
+        }
+      }
+      return button;
     };
     const openCloudDetails = async (name, row) => {
       debugLog(`opening ${name} in ${project}`);
@@ -510,7 +610,7 @@
     const row = await assignRowFor(wo, 8000);
     if (!row) throw new Problem(`${wo} isn't on TEMS's Assign page.`);
     await openAssignDetails(wo, row);
-    const openButton = await waitFor(() => detailsButton(/^(open|start)$/i), 5000);
+    const openButton = await openButtonWithLogin(wo, 5000);
     if (!openButton) throw new Problem(`${wo} is on Assign, but there's no Open button.`);
     if (!isEnabled(openButton)) throw new Problem(`${wo} is on Assign, but its ${textOf(openButton)} button is greyed out.`);
     const opened = await press(openButton, () => !openButton.isConnected || !isVisible(openButton) ||
@@ -567,13 +667,15 @@
       finish({ ok: true, summary: "TEMS: discarded (confirmed Yes)." });
       return;
     }
-    // Submit (for now): Chrome full window, Suspend, then on Assign: the WO's details scrolled to the
-    // bottom, a picture of the page, Open it again and Cancel the stationary test it offers.
+    // Submit: Chrome full window, Suspend, then on Assign: the WO's details scrolled to the bottom,
+    // a picture of the page, and Open it again. The app then presses play (warnings get OK) and has
+    // the "results" step reload TEMS until Submit / Discard / Suspend show again.
     needResultPage();
     await chrome.runtime.sendMessage({ type: "temsWindow", mode: "max" }).catch(() => {});
     try {
       await sleep(800);
       const what = await suspendRun();
+      stepsDone.push("suspend");
       reportStage("closed");
       if (!wo) throw new Problem(`${what}, but no WO is picked in Live Testing, so no picture.`);
       const row = await assignRowFor(wo, 20000);
@@ -584,67 +686,106 @@
       const shot = await chrome.runtime.sendMessage({ type: "captureTab" }).catch(() => null);
       if (!shot?.dataUrl) throw new Problem(`${what}, but the picture failed${shot?.error ? `: ${shot.error}` : ""}.`);
       debugLog("picture taken");
-      // Open it again; TEMS then offers a stationary test - Cancel it (the watcher does), wait for you.
-      window.kaamCancelStationaryUntil = Date.now() + 4 * 60000;
-      window.kaamStationaryCancelled = 0;
-      const openButton = await waitFor(() => detailsButton(/^(open|start)$/i), 8000);
+      shotTaken = shot.dataUrl;
+      stepsDone.push("picture");
+      // Open it again (any TEMS prompt that follows gets OK from the watcher).
+      const openButton = await openButtonWithLogin(wo, 8000);
       let reopened = "not reopened (no Open button)";
       if (openButton && isEnabled(openButton)) {
         const opened = await press(openButton, () => !openButton.isConnected || !isVisible(openButton) ||
           !assignDetailsShowWo(wo) || isSelected(menuButton("Control")), textOf(openButton));
         reopened = opened ? "opened again" : "Open clicked (no visible change yet)";
-        const cancelled = await waitFor(() => window.kaamStationaryCancelled, 90000, 500);
-        reopened += cancelled ? ", stationary test cancelled - waiting for you" : " - no stationary pop-up yet (it gets Cancel when it shows)";
       }
+      if (!openButton || !isEnabled(openButton)) {
+        throw new Problem(`${what}, picture taken, but ${wo} has no Open button on Assign${openButton ? " (greyed out)" : ""} - not opened again.`);
+      }
+      stepsDone.push("reopen");
       finish({ ok: true, screenshot: shot.dataUrl, summary: `TEMS: ${what}, picture taken, ${reopened}.` });
     } finally {
       await chrome.runtime.sendMessage({ type: "temsWindow", mode: "restore" }).catch(() => {});
     }
   };
 
-  try {
-    resetPageScroll();  // a page left shifted by an older version: back in place first
-    if (action === "play") { watchNotifications(); reportStage("started"); await playOnControl(); return; }
-    if (action === "openWo") { await openWoForTest(); return; }
-    if (["suspend", "discard", "submit"].includes(action)) { await endRun(action); return; }
-    // 1. TEMS Paragon loaded, then the Cloud tab.
-    const cloud = await waitFor(() => menuButton("Cloud"), appWaitMs);
-    if (!cloud) {
-      finish({ ok: false, error: `TEMS Paragon didn't load at ${location.origin}. Is TEMS Paragon running?` });
+  // Submit's last step, repeated by the app: open Results and look for Submit / Discard / Suspend.
+  // Not there: reload the whole TEMS page (the extension starts this script again after the
+  // reload) and look once more. There: press Submit (and OK / Yes to its confirm).
+  // Returns found and submitted: true / false.
+  const findResultControls = async () => {
+    const results = await waitFor(() => menuButton("Results"), appWaitMs);
+    if (!results) throw new Problem("TEMS isn't loaded (no Results tab).");
+    if (!isSelected(results)) {
+      debugLog("results: opening Results");
+      await clickAndWait(results, () => isSelected(menuButton("Results")));
+    }
+    if (await waitFor(resultControls, 20000, 500)) return "Results";
+    const control = menuButton("Control");  // the finished run can also show on Control
+    if (control) {
+      if (!isSelected(control)) await clickAndWait(control, () => isSelected(menuButton("Control")));
+      if (await waitFor(resultControls, 8000, 500)) return "Control";
+    }
+    return "";
+  };
+  const pressSubmit = async (where) => {
+    const button = resultButton(/^submit$/i);
+    if (!button) throw new Problem(`Submit / Discard / Suspend are showing on ${where}, but there's no Submit button.`);
+    debugLog("results: pressing Submit");
+    await realClick(button);
+    // TEMS's confirm, if it asks: Yes / OK / Submit
+    const confirmed = await clickNotification(/./, /^(yes|ok|submit)$/i, 8000, "submit confirm");
+    if (!confirmed) await confirmPopup();
+    const gone = await waitFor(() => !resultControls(), 30000, 500);
+    reportStage("closed");
+    return gone ? "Submit pressed" : "Submit pressed (the buttons are still showing - check TEMS)";
+  };
+  const resultsCheck = async () => {
+    const reloadKey = `kaamResultsReload:${job.requestId || wo}`;
+    const reloaded = !!sessionStorage.getItem(reloadKey);
+    sessionStorage.removeItem(reloadKey);
+    watchNotifications();  // warnings (also after the reload) still get OK
+    const where = await findResultControls();
+    if (!where && !reloaded) {
+      sessionStorage.setItem(reloadKey, String(Date.now()));
+      debugLog("results: Submit / Discard / Suspend not showing - reloading the TEMS page");
+      location.reload();
+      return;  // this script starts again in the reloaded page
+    }
+    if (!where) {
+      debugLog("results: Submit / Discard / Suspend not showing yet (after a reload)");
+      finish({ ok: true, found: false, summary: "TEMS: Submit / Discard / Suspend not showing yet." });
       return;
     }
-    if (!isSelected(cloud)) {
-      debugLog("clicking Cloud");
-      cloud.click();
-      if (!(await waitFor(() => isSelected(menuButton("Cloud")), 3000))) await realClick(menuButton("Cloud") || cloud);
-    }
-
-    // 2. Logged in already, or the Log in button?
-    const state = await waitFor(() => (isLoggedIn() ? "in" : loginButton() ? "out" : null), stateWaitMs);
-    if (!state) {
-      finish({ ok: false, error: "The TEMS Cloud page didn't show its assignments or a Log in button. Check the TEMS tab." });
-      return;
-    }
-
-    // 3. Log in: click it; the popup window signs in with Chrome's saved password.
-    if (state === "out") {
-      let clicks = 0, clickedAt = 0;
-      const end = Date.now() + loginWaitMs;
-      while (Date.now() < end && !isLoggedIn()) {
-        const button = loginButton();
-        if (button && clicks < maxLoginClicks && (!clickedAt || Date.now() - clickedAt > reclickAfterMs)) {
-          clicks += 1; clickedAt = Date.now();
-          debugLog(`clicking Log in (${clicks}/${maxLoginClicks})`);
-          await realClick(button);
-        }
-        await sleep(700);
-      }
-      if (!isLoggedIn()) {
-        finish({ ok: false, error: "Still not logged in to TEMS Cloud. Finish the login in its popup window, then try again." });
+    reportStage("complete");
+    let at = where;
+    const trouble = cloudTrouble();
+    if (trouble) {  // Submit goes to TEMS Cloud: logged out / offline -> log in first, then back here
+      debugLog(`results: TEMS says "${trouble}" - logging in to TEMS Cloud before Submit`);
+      await cloudLogin();
+      at = await findResultControls();
+      if (!at) {
+        finish({ ok: true, found: false, summary: `TEMS: logged in to TEMS Cloud ("${trouble}"); Submit / Discard / Suspend not showing again yet.` });
         return;
       }
     }
+    const what = await pressSubmit(at);
+    finish({ ok: true, found: true, submitted: true, where: at, summary: `TEMS: ${trouble ? "logged in to TEMS Cloud, then " : ""}${what} on ${at}.` });
+  };
 
+  try {
+    resetPageScroll();  // a page left shifted by an older version: back in place first
+    if (action === "results") { await resultsCheck(); return; }
+    if (action === "play") { watchNotifications(); reportStage("started"); await playOnControl(); return; }
+    if (action === "openWo") { await openWoForTest(); return; }
+    if (action === "cloudLogin") {  // TEMS not connected to TEMS Cloud: log in, then back to Control
+      watchNotifications();
+      const state = await cloudLogin();
+      const control = await waitFor(() => menuButton("Control"), 10000);
+      if (control && !isSelected(control)) await clickAndWait(control, () => isSelected(menuButton("Control")));
+      finish({ ok: true, cloudLogin: true, summary: `TEMS: ${state === "out" ? "logged in to TEMS Cloud" : "TEMS Cloud was already logged in"}, back on Control.` });
+      return;
+    }
+    if (["suspend", "discard", "submit"].includes(action)) { await endRun(action); return; }
+    // 1-3. TEMS Paragon loaded, the Cloud tab, logged in (Log in clicked if it asks).
+    const state = await cloudLogin();
 
     // 4. Let the Cloud list finish loading (stops changing).
     let last = -1, stableSince = Date.now();

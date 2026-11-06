@@ -181,3 +181,5 @@
 [data-theme="aurora"] .mk { border-color: #070912; }
 [data-theme="aurora"] .mk.missed { background: #141832; }
 [data-theme="aurora"] .mapsMap .leaflet-control-attribution { background: rgba(7, 9, 18, .7); }
+[data-theme="aurora"] .tpCard { background: rgba(20, 24, 48, .9); backdrop-filter: var(--glass); -webkit-backdrop-filter: var(--glass); border-radius: 24px; }
+[data-theme="aurora"] .tpBar i { background: var(--grad); }

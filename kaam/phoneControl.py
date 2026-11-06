@@ -337,17 +337,33 @@ def nrFirst(serials):
 
 
 def fullTestOneByOne(serials, onResult=None, onOrder=None):
-    """fullTest on each phone in turn, NR phones first then LTE - never two speed tests at the same time.
-    onOrder(names) gets the test order; onResult(result) is called as each phone finishes."""
+    """Test all: Service Mode + Speedtest on each phone (only if not already up), airplane toggle on
+    all phones at the same time, then the speed tests one phone after the other (NR phones first, then
+    LTE) - never two speed tests at once. onOrder(names) gets the test order; onResult(result) is
+    called as each phone finishes."""
+    for serial in serials:
+        checkStop()
+        serviceModeSplit(serial)
+    checkStop()
+    say("Airplane toggle on " + " and ".join(phoneName(s) for s in serials) + " at the same time")
+    online = {}
+    errors = onEachPhone(lambda serial: online.__setitem__(serial, toggleAirplane(serial)), serials)
+    checkStop()
     serials = nrFirst(serials)
     if onOrder:
         onOrder([phoneName(serial) for serial in serials])
     results = []
     for serial in serials:
+        checkStop()
         say(f"===== {phoneName(serial)} =====")
-        results.append(fullTest(serial))
+        if errors.get(serial) or not online.get(serial):
+            result = failedResult(serial, f"Airplane toggle failed: {errors[serial]}" if errors.get(serial)
+                                  else "No internet after the airplane toggle")
+        else:
+            result = speedTest(serial)
+        results.append(result)
         if onResult:
-            onResult(results[-1])
+            onResult(result)
     return results
 
 
@@ -847,6 +863,59 @@ def hotspotOnBest(serials, readings=None):
     changed = setHotspot(best, True)
     why = networkText(network)
     return f"Hotspot {'on' if changed else 'already on'}: {name} ({why})."
+
+
+def airplaneRace(serials, extraSeconds=2):
+    """Airplane toggle on every phone at the same time. Once the first phone is back online, waits
+    extraSeconds more and returns the phones online by then, fastest first. A slower phone is left
+    to finish on its own (slow to load the network = not the one to share)."""
+    onlineAt, finished = {}, set()
+    parentListener = listeners.get(threading.get_ident())
+
+    def worker(serial):
+        listenHere(parentListener)
+        try:
+            if toggleAirplane(serial):
+                onlineAt[serial] = time.time()
+        except Exception as error:
+            say(f"[{phoneName(serial)}] airplane toggle failed: {error}")
+        finally:
+            finished.add(serial)
+            listenHere(None)
+
+    for serial in serials:
+        threading.Thread(target=worker, args=(serial,), daemon=True).start()
+    while len(finished) < len(serials):
+        checkStop()
+        if onlineAt and time.time() >= min(onlineAt.values()) + extraSeconds:
+            break
+        time.sleep(0.2)
+    online = dict(onlineAt)
+    return sorted(online, key=online.get)
+
+
+def hotspotAfterAirplane(serials):
+    """Hotspot button: airplane toggle on every phone at once (that also turns any old hotspot off),
+    then hotspot on the best of the phones back online within 2s of the first one."""
+    say("Airplane toggle on " + " and ".join(phoneName(s) for s in serials) + " at the same time")
+    online = airplaneRace(serials)
+    if not online:
+        raise RuntimeError("No phone got internet back after the airplane toggle - no hotspot started.")
+    late = [phoneName(s) for s in serials if s not in online]
+    if late:
+        say(f"{', '.join(late)} still loading the network - left out")
+    networks = {}
+    onEachPhone(lambda serial: networks.__setitem__(serial, readNetworkSettled(serial, tries=3)), online)
+    checkStop()
+    scored = []
+    for rank, serial in enumerate(online):
+        network = networks.get(serial) or {}
+        say(f"[{phoneName(serial)}] {networkText(network)}")
+        score = hotspotScore(network)
+        scored.append((score is not None, score or (0, 0), -rank, serial))  # no reading: the fastest wins
+    *_, best = max(scored)
+    setHotspot(best, True)
+    return f"Hotspot on: {phoneName(best)} ({networkText(networks.get(best))})."
 
 
 def wakeAndUnlock(serial):
