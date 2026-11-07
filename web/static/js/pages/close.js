@@ -40,7 +40,7 @@ export default {
     const redo = redoBox({ what: "closed", onRedo: (wos) => runAll(wos), onLater: async (forWo) => {
       try {
         await api(`/api/records/${enc(forWo)}/later`, { body: { kind: "close" } });
-        toast(`${forWo}: put off - it's in Records (Close later) to pick up when you're ready.`, "ok", 6000);
+        toast(`${forWo}: Close later.`, "ok", 6000);
         refreshState();
       } catch (error) { toast(error.message, "bad"); }
       loadReady();

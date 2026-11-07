@@ -18,7 +18,7 @@ from .gridSummary import buildFolderName, copyGridSummary, findRenamedCopy
 from .sheetImport import readSheet
 from .ticketLookup import closeTicketSteps, currentDriveShift, lookupTicketId, openCreateTicketForm
 from .ticketStore import (findRecord, getRecord, importWorkOrders, isLocalStart, localIdPattern, now,
-                          renameWo, saveRecord, searchRecords, startLocal, startNewTicket)
+                          renameWo, saveRecord, searchRecords, startLocal, startNewTicket, beginTicket)
 from .whatsappShare import shareOnWhatsApp
 
 statusOptions = ["PASSED", "SKIPPED", "FAILED"]
@@ -217,12 +217,16 @@ def startCloud(wo, submit=True, shift=None, force=False, progress=lambda text: N
     olderId = record.get("startTicketId")
     if ticketId and olderId and olderId != ticketId:
         summary += f" (Records had {olderId} for this WO before; now {ticketId}.)"
-    saveError = safeSave(
-        wo, event=f"Start: {'ticket created ' + ticketId if ticketId else 'form filled, Create not clicked'}",
-        startedAt=now(), submitted=bool(ticketId), region=defaultRegion, market=defaultMarket,
-        driveShift=shift, folderName=buildFolderName(wo), startType="cloud",
-        **({"ticketId": ticketId, "startTicketId": ticketId} if ticketId else {}),
-    )
+    if ticketId:  # a new ticket: the WO's older ticket (run, submit, end...) moves out of the way
+        try:
+            beginTicket(wo, ticketId, event=f"Start: ticket created {ticketId}", startedAt=now(), submitted=True,
+                        region=defaultRegion, market=defaultMarket, driveShift=shift,
+                        folderName=buildFolderName(wo), startType="cloud")
+            saveError = None
+        except Exception as error:
+            saveError = f"Couldn't save to Records: {error}"
+    else:
+        saveError = safeSave(wo, event="Start: form filled, Create not clicked")
     if saveError:
         summary += f" {saveError}"
     return {"wo": wo, "summary": summary, "ticketId": ticketId, "ask": False}
@@ -233,10 +237,12 @@ def useExistingTicket(wo, ticketId, summary=""):
     record = getRecord(wo) or {}
     if record.get("endedAt"):
         summary += f" Note: Records shows this WO was already completed {niceTime(record['endedAt'])}."
-    saveError = safeSave(
-        wo, event=f"Start: ticket {ticketId} already existed in TechInsights - marked as started",
-        startedAt=now(), submitted=True, ticketId=ticketId, startTicketId=ticketId, startType="cloud",
-        folderName=buildFolderName(wo))
+    try:
+        beginTicket(wo, ticketId, event=f"Start: ticket {ticketId} already existed in TechInsights - marked as started",
+                    startedAt=now(), submitted=True, startType="cloud", folderName=buildFolderName(wo))
+        saveError = None
+    except Exception as error:
+        saveError = f"Couldn't save to Records: {error}"
     return (summary + (f" {saveError}" if saveError else "")).strip()
 
 
@@ -275,7 +281,22 @@ def checkPlanInTems(wos, progress=lambda text: None):
     wos = [wo for wo in dict.fromkeys(cleanWorkOrder(wo) for wo in wos) if wo]
     if not wos:
         raise WorkflowError("No WOs to check.")
-    progress(f"TEMS: reading every WO in the Cloud project and on Assign ({len(wos)} to check)…")
+    # Done WOs (ended, closed or submitted) were tested in TEMS already: In TEMS, no need to look.
+    stamp = now()
+    done = []
+    for wo in wos:
+        record = getRecord(wo) or {}
+        if record.get("endedAt") or record.get("closedAt") or record.get("submittedAt"):
+            done.append(wo)
+            safeSave(wo, temsCheck="found", temsCheckAt=stamp, temsName=record.get("temsName") or wo,
+                     temsWhere=record.get("temsWhere") or "cloud")
+    wos = [wo for wo in wos if wo not in done]
+    if not wos:
+        return {"checked": len(done), "found": done, "renamed": [], "missing": [], "problems": [],
+                "cloudCount": 0, "assignCount": 0,
+                "summary": f"All {len(done)} WOs are done already - In TEMS, TEMS not opened."}
+    progress(f"TEMS: reading every WO in the Cloud project and on Assign ({len(wos)} to check, "
+             f"{len(done)} done already)…")
     result = runTems("listWos", timeout=6 * 60)
     if not result.get("ok"):
         raise WorkflowError(result.get("error") or "TEMS didn't list its WOs.")
@@ -306,11 +327,14 @@ def checkPlanInTems(wos, progress=lambda text: None):
                 problems.append(f"{wo}: TEMS has it as {name}, but it couldn't be renamed ({error})")
         found.append(current)
         safeSave(current, temsCheck="found", temsCheckAt=stamp, temsName=name, temsWhere=where)
-    parts = [f"{len(found)} of {len(wos)} WOs are in TEMS"]
+    found = done + found
+    parts = [f"{len(found)} of {len(wos) + len(done)} WOs are in TEMS"]
+    if done:
+        parts.append(f"{len(done)} done already (not looked up)")
     if renamed:
         parts.append(f"{len(renamed)} renamed to TEMS's spelling")
     parts.append(f"{len(missing)} missing" if missing else "none missing")
-    return {"checked": len(wos), "found": found, "renamed": renamed, "missing": missing, "problems": problems,
+    return {"checked": len(wos) + len(done), "found": found, "renamed": renamed, "missing": missing, "problems": problems,
             "cloudCount": len(result.get("cloudNames") or []), "assignCount": len(result.get("assignNames") or []),
             "summary": " · ".join(parts) + "."}
 
@@ -650,7 +674,7 @@ def shareTickets(wos, group=None, progress=lambda text: None, post=lambda kind, 
     the caption, then its TEMS picture - the chat opened once, the WOs back to back. A WO already in
     the chat isn't sent again. Each WO is saved as shared the moment it's out (save=False: nothing
     saved, e.g. a test to another group). Returns {wo: result}."""
-    from .config import whatsappGroup
+    from .config import whatsappGroup, whatsappNoPicture
     from .pictures import pictureOf
     from .whatsappShare import shareManyOnWhatsApp
     group = group or whatsappGroup
@@ -658,7 +682,7 @@ def shareTickets(wos, group=None, progress=lambda text: None, post=lambda kind, 
     for wo in wos:
         record = getRecord(wo) or {}
         picture = pictureOf(record)
-        if not picture:
+        if not picture and not whatsappNoPicture:  # Settings > WhatsApp can allow sharing without it
             results[wo] = {"wo": wo, "ok": False, "error": "no TEMS picture yet - add it on End Ticket first"}
             continue
         items.append({"wo": wo, "caption": whatsappCaption(wo, reportFromRecord(record)),
@@ -688,17 +712,18 @@ def shareTickets(wos, group=None, progress=lambda text: None, post=lambda kind, 
 
 def shareTicket(wo, report, send=None, csvPath=None, progress=lambda text: None, checkFirst=False, woDone=True):
     """Share the renamed CSV + the TEMS picture + the report (Ticket ID blank for a local start) on
-    WhatsApp (the picture as a photo after the CSV), then (woDone) "<WO> - Done" in the WO group. The picture is required."""
+    WhatsApp (the picture as a photo after the CSV), then (woDone) "<WO> - Done" in the WO group. The picture is required,
+    unless Settings > WhatsApp > Share without the TEMS picture is on (then CSV + report only)."""
     wo = cleanWorkOrder(wo)
     if not wo:
         raise WorkflowError("Enter a WO first.")
-    from .config import whatsappGroup, whatsappSend
+    from .config import whatsappGroup, whatsappNoPicture, whatsappSend
     send = whatsappSend if send is None else send
     from .pictures import pictureOf
     record = getRecord(wo) or {}
     csvPath = csvPath or record.get("gridSummaryPath")
     picture = pictureOf(record)
-    if not picture:
+    if not picture and not whatsappNoPicture:
         raise WorkflowError(f"{wo}: no TEMS picture yet - add it on End Ticket (or Submit on Live Testing) "
                             "before sharing. It goes out with the CSV and the report.")
     progress("Sharing on WhatsApp… (waiting for WhatsApp to load fully)")

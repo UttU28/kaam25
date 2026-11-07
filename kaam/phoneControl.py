@@ -106,6 +106,58 @@ def connectedSerials():
     return [line.split("\t")[0] for line in lines if line.endswith("\tdevice")]
 
 
+# ---------- where the phones are (their GPS - the laptop has none) ----------
+locationLinePattern = re.compile(
+    r"Location\[(gps|fused|network) (-?\d+\.\d+),(-?\d+\.\d+) hAcc=([\d.]+) et=\+((?:\d+d)?(?:\d+h)?(?:\d+m)?(?:\d+s)?(?:\d+ms)?)")
+
+
+def elapsedSeconds(text):
+    """'+19h7m33s652ms' (time since the phone booted) -> seconds."""
+    total = 0.0
+    for amount, unit in re.findall(r"(\d+)(ms|d|h|m|s)", text):
+        total += int(amount) * {"d": 86400, "h": 3600, "m": 60, "s": 1, "ms": 0.001}[unit]
+    return total
+
+
+def fixRank(fix):
+    return (fix["provider"] == "network", fix["age"] > 120, fix["acc"], fix["age"])  # GPS-grade, fresh, accurate first
+
+
+def locationOf(serial, maxAgeSeconds=600):
+    """This phone's best recent fix (dumpsys location: gps / fused, else network), or None.
+    {lat, lon, acc (m), age (s), provider, phone}."""
+    try:
+        uptime = float(adbShell(serial, "cat /proc/uptime", timeout=8).split()[0])
+        text = adbShell(serial, "dumpsys location", timeout=15)
+    except Exception:
+        return None
+    fixes = []
+    for provider, lat, lon, acc, et in locationLinePattern.findall(text):
+        age = max(0.0, uptime - elapsedSeconds(et))
+        if age > maxAgeSeconds or (float(lat) == 0 and float(lon) == 0):
+            continue
+        fixes.append({"lat": float(lat), "lon": float(lon), "acc": float(acc), "age": round(age),
+                      "provider": provider, "phone": phoneName(serial)})
+    return min(fixes, key=fixRank) if fixes else None
+
+
+def phoneLocation(maxAgeSeconds=600):
+    """The best recent fix of the connected phones, or None (see locationOf)."""
+    fixes = [fix for fix in (locationOf(serial, maxAgeSeconds) for serial in connectedSerials()) if fix]
+    return min(fixes, key=fixRank) if fixes else None
+
+
+def testSpot(serial):
+    """Where a speed test ran: this phone's GPS right then, or None. Never stops a test."""
+    try:
+        fix = locationOf(serial, maxAgeSeconds=300)
+    except Exception:
+        return None
+    if fix:
+        say(f"[{phoneName(serial)}] at {fix['lat']:.6f}, {fix['lon']:.6f} (±{fix['acc']:.0f} m, {fix['provider']})")
+    return fix
+
+
 # ---------- which phones ----------
 
 def configuredPhones():
@@ -233,29 +285,148 @@ speedtestResultScript = """(() => {
 })()"""
 
 
-def evalOnSpeedtest(serial, script):
-    """Runs JavaScript on the phone's Speedtest page. Raises if Speedtest isn't open."""
-    port, pages = devtoolsPages(serial)
+# While a test runs: the biggest number on screen (the gauge) and the Download / Upload / Ping
+# label nearest to it.
+liveSpeedScript = r"""(() => {
+  const leaves = [...document.querySelectorAll('body *')].filter(e => !e.childElementCount);
+  const shown = (r) => r.width > 0 && r.height > 0 && r.bottom > 0 && r.top < innerHeight;
+  let best = null;
+  for (const e of leaves) {
+    const t = (e.textContent || '').trim();
+    if (!/^\d{1,4}([.,]\d{1,2})?$/.test(t)) continue;
+    const r = e.getBoundingClientRect();
+    if (!shown(r)) continue;
+    const size = parseFloat(getComputedStyle(e).fontSize) || 0;
+    if (!best || size > best.size) best = { size, value: t.replace(',', '.'), r };
+  }
+  if (!best || best.size < 20) return null;
+  let label = '', far = Infinity;
+  for (const e of leaves) {
+    const t = (e.textContent || '').trim().toLowerCase();
+    if (!/^(download|upload|ping)$/.test(t)) continue;
+    const r = e.getBoundingClientRect();
+    if (!shown(r)) continue;
+    const d = Math.hypot(r.x + r.width / 2 - best.r.x - best.r.width / 2, r.y + r.height / 2 - best.r.y - best.r.height / 2);
+    if (d < far) { far = d; label = t; }
+  }
+  return { value: best.value, label };
+})()"""
+liveSpeeds = {}  # phone name -> {value, label, at} while its speed test runs
+
+
+def speedtestPage(pages):
+    """(page, failed): the Speedtest tab - or Chrome's error page standing in for it (Speedtest was
+    opened with no internet, e.g. during airplane mode: failed=True). (None, False) if neither."""
+    for page in pages:
+        if "speedtest.net" in page.get("url", "") and page.get("webSocketDebuggerUrl"):
+            return page, False
+    for page in pages:
+        if page.get("url", "").startswith("chrome-error://") and "speedtest" in (page.get("title") or "").lower() \
+                and page.get("webSocketDebuggerUrl"):
+            return page, True
+    return None, False
+
+
+speedtestReloads = {}  # serial -> when Chrome's error page was last sent to speedtest.net again
+
+
+class ChromeFrozen(RuntimeError):
+    """Chrome is open but stuck (not answering, or Android's "isn't responding" box)."""
+
+
+def chromeNotResponding(serial):
+    """Android's "Chrome isn't responding" box is up."""
     try:
-        for page in pages:
-            if "speedtest.net" in page.get("url", "") and page.get("webSocketDebuggerUrl"):
-                return devtoolsEval(page["webSocketDebuggerUrl"], script)
-        raise RuntimeError("Speedtest isn't open on the phone (run the Service Mode setup first).")
+        text = adbShell(serial, "dumpsys window | grep -iE 'not responding'", timeout=8)
+    except Exception:
+        return False
+    return bool(re.search(r"Application Not Responding:\s*com\.android\.chrome", text))
+
+
+def chromeAnswers(serial, timeout=4):
+    """Does Chrome answer at all (a 1+1 in its tab within a few seconds)? False when it's frozen,
+    not running, or Android says it isn't responding."""
+    if chromeNotResponding(serial):
+        return False
+    port = None
+    try:
+        port, pages = devtoolsPages(serial, timeout=timeout)
+        page, _ = speedtestPage(pages)
+        page = page or next((x for x in pages if x.get("type") == "page" and x.get("webSocketDebuggerUrl")), None)
+        if not page:
+            return False  # Chrome up but no tab to talk to: no Speedtest either
+        return devtoolsEval(page["webSocketDebuggerUrl"], "1+1", timeout=timeout) == 2
+    except Exception:
+        return False
     finally:
-        runAdb(["forward", "--remove", f"tcp:{port}"], serial=serial)
+        if port:
+            runAdb(["forward", "--remove", f"tcp:{port}"], serial=serial)
+
+
+def closeChrome(serial):
+    """Force-closes Chrome (frozen): Android's "isn't responding" box goes with it."""
+    adbShell(serial, "am force-stop com.android.chrome")
+    time.sleep(1)
+
+
+def restartChrome(serial):
+    """Chrome frozen: close it and set up Service Mode + Speedtest again."""
+    say(f"[{phoneName(serial)}] Chrome is frozen - closing it and opening Speedtest again")
+    closeChrome(serial)
+    serviceModeSplit(serial, checkChrome=False)
+
+
+def evalOnSpeedtest(serial, script, tries=3, checkFrozen=True):
+    """Runs JavaScript on the phone's Speedtest page. Chrome just opened and not answering yet: tries
+    again. Chrome's "no internet" page instead of Speedtest: loads speedtest.net again. Raises if
+    Speedtest still isn't there."""
+    lastError = None
+    for attempt in range(tries):
+        port = None
+        try:
+            port, pages = devtoolsPages(serial)
+            page, failed = speedtestPage(pages)
+            if page and failed:
+                if time.time() - speedtestReloads.get(serial, 0) > 10:  # give a reload time to finish
+                    speedtestReloads[serial] = time.time()
+                    say(f"[{phoneName(serial)}] Speedtest didn't load (no internet then) - loading it again")
+                    devtoolsEval(page["webSocketDebuggerUrl"], f"location.href = {json.dumps(speedtestUrl)}")
+                lastError = RuntimeError("Speedtest is still loading on the phone.")
+            elif page:
+                return devtoolsEval(page["webSocketDebuggerUrl"], script)
+            else:
+                lastError = RuntimeError("Speedtest isn't open on the phone (run the Service Mode setup first).")
+        except Exception as error:  # Chrome's debugging socket not up yet, adb busy...
+            if type(error).__name__ == "StoppedError":
+                raise
+            lastError = error
+        finally:
+            if port:
+                runAdb(["forward", "--remove", f"tcp:{port}"], serial=serial)
+        if attempt < tries - 1:
+            time.sleep(1.5)
+    if checkFrozen and not chromeAnswers(serial):
+        raise ChromeFrozen(f"Chrome isn't responding ({lastError}).")
+    raise lastError
 
 
 def startSpeedtest(serial):
-    """Presses GO (or Test Again after an earlier test) on the open Speedtest page. Returns True if pressed."""
+    """Presses GO (or Test Again after an earlier test) on the open Speedtest page. Returns True if pressed.
+    The 'better with the app' popup is closed first (it would block GO); no GO after a while: the
+    page is reloaded once (it can be stuck on its own "no connection" message)."""
     name = phoneName(serial)
     wakeAndUnlock(serial)
-    closeSpeedtestPopup(serial, waitSeconds=0)  # the 'better with the app' popup would block GO
-    for _ in range(10):  # the button can take a moment to show after the network comes back
+    for attempt in range(16):  # the button can take a moment to show after the network comes back
         checkStop()
+        closeSpeedtestPopup(serial, waitSeconds=0)
         pressed = evalOnSpeedtest(serial, startSpeedtestScript)
         if pressed:
             say(f"[{name}] speed test started ({pressed})")
             return True
+        if attempt == 7:
+            say(f"[{name}] no GO button yet - reloading Speedtest")
+            evalOnSpeedtest(serial, "(() => { location.reload(); return true; })()")
+            time.sleep(2)
         time.sleep(1)
     say(f"[{name}] WARNING: no GO / Test Again button on the Speedtest page")
     return False
@@ -272,28 +443,37 @@ def runSpeedtest(serial, timeout=180):
         raise RuntimeError("Could not start the speed test.")
     say(f"[{name}] waiting for the result…")
     end = time.time() + timeout
-    while time.time() < end:
-        checkStop()
-        time.sleep(2)
-        now = evalOnSpeedtest(serial, speedtestResultScript) or {}
-        if now.get("finished") and now.get("resultId") and now.get("resultId") != before.get("resultId"):
-            loaded = f", {now['pingLoaded']} ms loaded" if now.get("pingLoaded") else ""
-            say(f"[{name}] speed test done: {now.get('download') or '?'} Mbps down, ping {now.get('ping') or '?'} ms{loaded}"
-                f" (Result ID {now['resultId']})")
-            if network.get("source") != "serviceMode":  # Service Mode wasn't ready at the start: try again
-                later = readNetwork(serial)
-                if later.get("source") == "serviceMode" and later.get("tech") == network.get("tech"):
-                    network = later
-                    say(f"[{name}] on {networkText(network)}")
-            return {"phone": name, "network": network, **now}
-    raise RuntimeError(f"No speed test result after {timeout}s.")
+    script = f"(() => ({{ ...{speedtestResultScript}, live: (() => {{ try {{ return {liveSpeedScript}; }} catch (e) {{ return null; }} }})() }}))()"
+    try:
+        while time.time() < end:
+            checkStop()
+            time.sleep(1)
+            now = evalOnSpeedtest(serial, script) or {}
+            live = now.pop("live", None)
+            if live and not now.get("finished"):
+                liveSpeeds[name] = {**live, "at": time.time()}
+            if now.get("finished") and now.get("resultId") and now.get("resultId") != before.get("resultId"):
+                break
+        else:
+            raise RuntimeError(f"No speed test result after {timeout}s.")
+    finally:
+        liveSpeeds.pop(name, None)
+    loaded = f", {now['pingLoaded']} ms loaded" if now.get("pingLoaded") else ""
+    say(f"[{name}] speed test done: {now.get('download') or '?'} Mbps down, ping {now.get('ping') or '?'} ms{loaded}"
+        f" (Result ID {now['resultId']})")
+    if network.get("source") != "serviceMode":  # Service Mode wasn't ready at the start: try again
+        later = readNetwork(serial)
+        if later.get("source") == "serviceMode" and later.get("tech") == network.get("tech"):
+            network = later
+            say(f"[{name}] on {networkText(network)}")
+    return {"phone": name, "network": network, "location": testSpot(serial), **now}
 
 
 def failedResult(serial, reason):
     """A test that gave no speed (no service, no internet, page stuck) - still shown and saved."""
     network = readNetwork(serial)
     say(f"[{phoneName(serial)}] no speed: {reason} (network: {networkText(network)})")
-    return {"phone": phoneName(serial), "network": network, "download": "", "ping": "", "pingLoaded": "",
+    return {"phone": phoneName(serial), "network": network, "location": testSpot(serial), "download": "", "ping": "", "pingLoaded": "",
             "resultId": f"none-{int(time.time())}", "error": reason}
 
 
@@ -304,9 +484,14 @@ def airplaneThenSpeedtest(serial):
 
 
 def speedTest(serial):
-    """Speed test on what's open now; a failure still gives a result (no speed + the network)."""
+    """Speed test on what's open now; a failure still gives a result (no speed + the network).
+    Chrome frozen: closed, Speedtest opened again, and the test run once more."""
     try:
-        return runSpeedtest(serial)
+        try:
+            return runSpeedtest(serial)
+        except ChromeFrozen:
+            restartChrome(serial)
+            return runSpeedtest(serial)
     except Exception as error:
         if type(error).__name__ == "StoppedError":  # Stop pressed: end everything
             raise
@@ -617,15 +802,28 @@ def networkFromAndroid(serial):
         bw = androidBandwidth(configs, tech)
         if tech == "NR":
             nr = signal.split("mNr=", 1)[-1]
-            return network("NR", f"n{bands}" if bands else "", "", find(r"ssRsrp = (-?\d+)", nr),
-                           find(r"ssSinr = (-?\d+)", nr), "android", find(r"ssRsrq = (-?\d+)", nr), channel, bw)
+            return {**network("NR", f"n{bands}" if bands else "", "", find(r"ssRsrp = (-?\d+)", nr),
+                              find(r"ssSinr = (-?\d+)", nr), "android", find(r"ssRsrq = (-?\d+)", nr), channel, bw),
+                    "bars": signalBars(signal, tech)}
         lte = signal.split("mLte=", 1)[-1]
         if not bw:
             khz = find(r"mBandwidth=(\d+)", cell)
             bw = str(round(int(khz) / 1000)) if khz else ""
-        return network(tech, f"B{bands}" if bands else "", "", find(r"rsrp=(-?\d+)", lte),
-                       find(r"rssnr=(-?\d+)", lte), "android", find(r"rsrq=(-?\d+)", lte), channel, bw)
-    return network("No service", source="android")
+        return {**network(tech, f"B{bands}" if bands else "", "", find(r"rsrp=(-?\d+)", lte),
+                          find(r"rssnr=(-?\d+)", lte), "android", find(r"rsrq=(-?\d+)", lte), channel, bw),
+                "bars": signalBars(signal, tech)}
+    return {**network("No service", source="android"), "bars": 0}
+
+
+def signalBars(signal, tech):
+    """Bars on the phone's status bar (0-4), from its mSignalStrength line. Samsung puts what it shows
+    in SignalBarInfo{ nrLevel=4 }; otherwise it's the serving radio's own level=."""
+    info = re.search(r"SignalBarInfo\{([^}]*)\}", signal)
+    level = re.search(r"Level=(\d)", info.group(1), re.I) if info else None
+    if not level:
+        part = signal.split("mNr=" if tech == "NR" else "mLte=", 1)[-1]
+        level = re.search(r"\blevel\s*=\s*(\d)", part)
+    return min(int(level.group(1)), 4) if level else None
 
 
 def readNetwork(serial):
@@ -662,17 +860,21 @@ def networkText(found):
 
 # ---------- Chrome page control (DevTools over adb) ----------
 
-def devtoolsPages(serial):
+def devtoolsPages(serial, timeout=5):
     """Forwards Chrome's debugging socket to a free local port; returns (port, [pages])."""
     port = int(runAdb(["forward", "tcp:0", "localabstract:chrome_devtools_remote"], serial=serial))
-    with urllib.request.urlopen(f"http://127.0.0.1:{port}/json", timeout=5) as response:
-        return port, json.loads(response.read())
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/json", timeout=timeout) as response:
+            return port, json.loads(response.read())
+    except Exception:
+        runAdb(["forward", "--remove", f"tcp:{port}"], serial=serial)
+        raise
 
 
-def devtoolsEval(webSocketUrl, expression):
+def devtoolsEval(webSocketUrl, expression, timeout=10):
     """Runs JavaScript in a Chrome tab and returns its value (tiny WebSocket client, no extra packages)."""
     url = urllib.parse.urlparse(webSocketUrl)
-    with socket.create_connection((url.hostname, url.port), timeout=10) as connection:
+    with socket.create_connection((url.hostname, url.port), timeout=timeout) as connection:
         key = base64.b64encode(os.urandom(16)).decode()
         connection.sendall((f"GET {url.path} HTTP/1.1\r\nHost: {url.hostname}:{url.port}\r\nUpgrade: websocket\r\n"
                             f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n").encode())
@@ -713,9 +915,10 @@ def devtoolsEval(webSocketUrl, expression):
                 return reply.get("result", {}).get("result", {}).get("value")
 
 
-continueOnWebScript = """(() => {
-  const link = [...document.querySelectorAll('a,button')]
-    .find(e => /^continue on the web$/i.test(e.textContent.trim()) && e.offsetParent !== null);
+continueOnWebScript = r"""(() => {
+  const shown = (e) => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  const link = [...document.querySelectorAll('a,button,[role=button]')]
+    .find(e => /^continue (on|in|with) (the )?(web|browser)/i.test(e.textContent.trim()) && shown(e));
   if (!link) return false;
   link.click();
   return true;
@@ -723,27 +926,37 @@ continueOnWebScript = """(() => {
 
 
 def closeSpeedtestPopup(serial, waitSeconds=8):
-    """Clicks 'Continue on the web' on Speedtest's 'better with the app' popup, only if it shows up."""
-    port = None
-    try:
-        end = time.time() + waitSeconds
-        while True:
-            port, pages = devtoolsPages(serial)
-            for page in pages:
-                if "speedtest.net" in page.get("url", "") and page.get("webSocketDebuggerUrl"):
-                    if devtoolsEval(page["webSocketDebuggerUrl"], continueOnWebScript):
-                        say(f"[{phoneName(serial)}] closed the Speedtest app popup (Continue on the web)")
-                        return
-            runAdb(["forward", "--remove", f"tcp:{port}"], serial=serial)
-            port = None
-            if time.time() >= end:
-                return
-            time.sleep(1)
-    except Exception as error:
-        say(f"[{phoneName(serial)}] could not check the Speedtest popup: {error}")
-    finally:
-        if port:
-            runAdb(["forward", "--remove", f"tcp:{port}"], serial=serial)
+    """Clicks 'Continue on the web' on Speedtest's 'better with the app' popup the moment it shows,
+    looking every half second for up to waitSeconds (0 = one look). Chrome not answering yet, or
+    the page still loading, is just looked at again. Returns True if it was clicked."""
+    end = time.time() + waitSeconds
+    while True:
+        try:
+            if evalOnSpeedtest(serial, continueOnWebScript, tries=1, checkFrozen=False):
+                say(f"[{phoneName(serial)}] closed the Speedtest app popup (Continue on the web)")
+                return True
+        except Exception as error:
+            if type(error).__name__ == "StoppedError":
+                raise
+        if time.time() >= end:
+            return False
+        time.sleep(0.5)
+
+
+def watchSpeedtestPopup(serial, seconds=30):
+    """Right after Speedtest opens: keep looking (in the background, while Service Mode etc. are set
+    up) and click 'Continue on the web' the moment the popup appears."""
+    callback = listeners.get(threading.get_ident())
+
+    def run():
+        listenHere(callback)
+        try:
+            closeSpeedtestPopup(serial, seconds)
+        except Exception:
+            pass
+        finally:
+            listenHere(None)
+    threading.Thread(target=run, daemon=True, name=f"speedtest popup {serial}").start()
 
 
 def leaveSplitScreen(serial):
@@ -782,10 +995,10 @@ def openSpeedtest(serial):
     """Opens the Speedtest shortcut from the home screen; falls back to speedtest.net in Chrome."""
     adbShell(serial, "input keyevent KEYCODE_HOME")
     time.sleep(0.8)
-    if tapLabel(serial, speedtestLabel):
-        return waitForActivity(serial, "com.android.chrome")
-    say(f"[{phoneName(serial)}] no '{speedtestLabel}' icon on the home screen, opening {speedtestUrl} in Chrome")
-    adbShell(serial, f"am start -a android.intent.action.VIEW -d {speedtestUrl} -p com.android.chrome")
+    if not tapLabel(serial, speedtestLabel):
+        say(f"[{phoneName(serial)}] no '{speedtestLabel}' icon on the home screen, opening {speedtestUrl} in Chrome")
+        adbShell(serial, f"am start -a android.intent.action.VIEW -d {speedtestUrl} -p com.android.chrome")
+    watchSpeedtestPopup(serial)  # 'Continue on the web' the moment it shows
     return waitForActivity(serial, "com.android.chrome")
 
 
@@ -894,6 +1107,17 @@ def airplaneRace(serials, extraSeconds=2):
     return sorted(online, key=online.get)
 
 
+def airplaneAll(serials):
+    """Airplane button: airplane on and off on every phone at the same time; waits for all of them."""
+    say("Airplane toggle on " + " and ".join(phoneName(s) for s in serials) + " at the same time")
+    back = {}
+    onEachPhone(lambda serial: back.__setitem__(serial, toggleAirplane(serial)), serials)
+    online = [phoneName(s) for s in serials if back.get(s)]
+    offline = [phoneName(s) for s in serials if not back.get(s)]
+    text = (f"{' and '.join(online)} back online" if online else "") +         ("; " if online and offline else "") + (f"{' and '.join(offline)} no internet yet" if offline else "")
+    return {"ok": not offline, "summary": f"Airplane toggled on both: {text}."}
+
+
 def hotspotAfterAirplane(serials):
     """Hotspot button: airplane toggle on every phone at once (that also turns any old hotspot off),
     then hotspot on the best of the phones back online within 2s of the first one."""
@@ -944,7 +1168,7 @@ def openServiceMode(serial):
     return taskId
 
 
-def serviceModeSplit(serial):
+def serviceModeSplit(serial, checkChrome=True):
     """Service Mode on top, Speedtest below. If both are already on screen, nothing is reopened:
     only the split size, SIM page and Speedtest popup are checked."""
     name = phoneName(serial)
@@ -952,7 +1176,15 @@ def serviceModeSplit(serial):
     started = time.time()
     ready = lambda: say(f"[{name}] ready: Service Mode on top ({round(splitRatio * 100)}%), Speedtest below "
                         f"({time.time() - started:.0f}s)")
-    if bothOnScreen(serial, timeout=0):
+    onScreen = bothOnScreen(serial, timeout=0)
+    if onScreen and checkChrome and not chromeAnswers(serial):
+        say(f"[{name}] Chrome is open but frozen - closing it and opening Speedtest again")
+        closeChrome(serial)
+        onScreen = False
+    elif not onScreen and checkChrome and chromeNotResponding(serial):
+        say(f"[{name}] Chrome isn't responding - closing it")
+        closeChrome(serial)
+    if onScreen:
         say(f"[{name}] Service Mode and Speedtest already open, checking the split")
         resizeSplit(serial)
         openActiveSim(serial, waitSeconds=0)  # only if Service Mode is on its main menu
@@ -967,6 +1199,7 @@ def serviceModeSplit(serial):
         speedtestTask, reused = openSpeedtest(serial), False
     else:
         say(f"[{name}] Speedtest is in recent apps - reusing it")
+        watchSpeedtestPopup(serial, seconds=15)  # it can reload and show the popup again
     say(f"[{name}] opening Service Mode ({serviceModeCode})")
     openServiceMode(serial)
     say(f"[{name}] Service Mode opened")

@@ -191,7 +191,7 @@ export default {
       try {
         const r = await api("/api/records/bulk", { body: { action, wos } });
         checked.clear();
-        toast(action === "delete" ? `Deleted ${r.count}. Copies are kept in tickets.deleted.json.` : `Marked ${r.count} done.`, "ok");
+        toast(action === "delete" ? `Deleted ${r.count}.` : `Marked ${r.count} done.`, "ok");
         load(); refreshState();
       } catch (error) { toast(error.message, "bad"); }
     }
@@ -221,7 +221,7 @@ export default {
       if (!wos.length) return;
       try {
         const r = await api("/api/records/moveToday", { body: { wos } });
-        checked.clear(); toast(`Moved ${r.moved} to today - they're at the top of Start's To start list.`, "ok"); load(); refreshState();
+        checked.clear(); toast(`Moved ${r.moved} to today.`, "ok"); load(); refreshState();
       } catch (error) { toast(error.message, "bad"); }
     });
 
@@ -230,7 +230,7 @@ export default {
       if (!wos.length) return;
       try {
         const r = await api("/api/records/moveToday", { body: { wos, tomorrow: true } });
-        checked.clear(); toast(`Moved ${r.moved} to tomorrow - they show under Today and in Start's To start list from midnight.`, "ok"); load(); refreshState();
+        checked.clear(); toast(`Moved ${r.moved} to tomorrow.`, "ok"); load(); refreshState();
       } catch (error) { toast(error.message, "bad"); }
     });
 

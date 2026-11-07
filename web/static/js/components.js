@@ -151,7 +151,7 @@ export function woBox(opts = {}) {
   clear.addEventListener("click", () => { input.value = ""; resolve(); input.focus(); });
   $(".copyBtn", el)?.addEventListener("click", (event) => {
     const wo = cleanWo(input.value);
-    if (wo) copyWithFlash(event.currentTarget, wo); else toast("Nothing to copy - the WO box is empty.", "warn");
+    if (wo) copyWithFlash(event.currentTarget, wo); else toast("WO box is empty.", "warn");
   });
 
   let refreshPicker = () => {};

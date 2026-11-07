@@ -8,7 +8,7 @@ const extensionVersion = chrome.runtime.getManifest().version;
 
 // Keep equal to "version" in manifest.json. Chrome can keep running an old saved copy of this
 // file after an update (seen across a Chrome restart); when it does, reload to get the new code.
-const backgroundBuild = "3.53";
+const backgroundBuild = "3.58";
 if (extensionVersion !== backgroundBuild) chrome.runtime.reload();
 
 // Sends to the app. If the app says our files changed on disk, reload to pick them up.
@@ -465,7 +465,8 @@ async function handleMessage(message, sender) {
       return true;
     case "temsStage":
       // The TEMS tab's watcher: where the test is (stationary / mobility / complete / closed). Live Testing shows it.
-      sendToBridge({ stage: "temsStage", temsStage: message.stage || "", wo: message.wo || "" });
+      sendToBridge({ stage: "temsStage", temsStage: message.stage || "", wo: message.wo || "",
+        event: message.event || "", eventText: message.eventText || "" });
       return true;
     case "captureTab": {
       // Submit: a picture of the TEMS page as it shows now (PNG data URL). Only for a TEMS tab running a job.

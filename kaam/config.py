@@ -116,6 +116,8 @@ whatsappRetries = max(0, getInt("WHATSAPP_RETRIES"))
 # On: phones/PCs on the same WiFi can open the app at http://<this PC's IP>:5000.
 lanAccess = (os.environ.get("LAN_ACCESS") or "true").strip().lower() in ("1", "true", "yes", "on")
 whatsappAutoShare = (os.environ.get("WHATSAPP_AUTO_SHARE") or "true").strip().lower() in ("1", "true", "yes", "on")
+# Share on WhatsApp even without the TEMS picture (CSV + report only). Off by default: picture required.
+whatsappNoPicture = (os.environ.get("WHATSAPP_NO_PICTURE") or "false").strip().lower() in ("1", "true", "yes", "on")
 
 # ---------- Apeksha (share a location to your site) ----------
 # Optional in .env; defaults to your site.

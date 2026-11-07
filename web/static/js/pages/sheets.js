@@ -82,7 +82,7 @@ export default {
       const wos = rowsFor(t).map((r) => r.wo).filter(Boolean);
       if (!wos.length) return;
       const group = store.settings?.whatsappWoGroup;
-      if (!group) { toast("No WO group set - add it in Settings (WhatsApp) first.", "warn", 6000); return; }
+      if (!group) { toast("No WO group - set it in Settings.", "warn", 6000); return; }
       const text = wos.map((wo) => `${wo} - Done`).join("\n");
       const ok = await modal({
         title: `Send ${wos.length} to ${group}?`,

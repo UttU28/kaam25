@@ -3,7 +3,7 @@
 // to drive today follows the shortest road route (travelling-salesman style), or your own order
 // if you dragged the list - that order is saved per day.
 import { $, api, clock, copyWithFlash, esc, icon, onDataChange, toast } from "../core.js";
-import { progressBadge, statusBadge } from "../components.js";
+import { locationTarget, progressBadge, shareLocation, statusBadge } from "../components.js";
 
 const mapCategories = [
   { key: "completed", label: "Completed", color: "var(--green)", on: true },
@@ -190,7 +190,7 @@ function mountMap(L, root, mapEl) {
           ${mapCategories.map((c) => `<label class="mfRow" data-row="${c.key}"><input type="checkbox" data-cat="${c.key}" ${filter[c.key] ? "checked" : ""}>
             <span class="mfDot" style="background:${c.color}"></span><span class="mfLabel" data-label="${c.key}">${c.label}</span><b data-count="${c.key}">0</b></label>`).join("")}
           <div class="mfSep" data-today></div>
-          <div class="mfRow" data-today><span class="mfDot me"></span><span class="mfLabel">Your location<small data-mestate></small></span></div>
+          <div class="mfRow" data-today data-findme title="Show me on the map"><span class="mfDot me"></span><span class="mfLabel">Your location<small data-mestate></small></span></div>
         </div>`;
       box.querySelector(".mfHead").onclick = () => {
         const body = box.querySelector(".mfBody");
@@ -235,34 +235,61 @@ function mountMap(L, root, mapEl) {
   new Tools({ position: "topleft" }).addTo(map);
 
   // ----- your location -----
-  const meIcon = L.divIcon({ className: "", html: '<div class="meDot"></div>', iconSize: [18, 18], iconAnchor: [9, 9] });
-  function setMe(lat, lon, acc, manual) {
-    me = { lat, lon, acc, manual };  // only moves your dot: the plan changes only on "From my location"
+  // Your dot: blue with a "YOU" tag (no pin uses blue-on-white); faded when it's only a rough guess.
+  const meIconFor = (rough) => L.divIcon({ className: "", html: `<div class="meDot${rough ? " rough" : ""}"><b>YOU</b></div>`,
+    iconSize: [20, 20], iconAnchor: [10, 10] });
+  const miles = (m) => (m / 1609).toFixed(m < 16090 ? 1 : 0);
+  function setMe(lat, lon, acc, manual, rough = false, phone = "") {
+    const firstGood = !rough && (!me || me.rough || (phone && !me.phone));  // the first real fix: frame it
+    me = { lat, lon, acc, manual, rough, phone };  // only moves your dot: the plan changes only on "From my location"
     if (!meMarker) {
-      meMarker = L.marker([lat, lon], { icon: meIcon, zIndexOffset: 1000 }).addTo(map).bindPopup("");
-      meCircle = L.circle([lat, lon], { radius: Math.max(acc, 1), color: "#e3a63d", weight: 1, fillOpacity: .08, interactive: false }).addTo(map);
+      meMarker = L.marker([lat, lon], { icon: meIconFor(rough), zIndexOffset: 2000 }).addTo(map).bindPopup("");
+      meCircle = L.circle([lat, lon], { radius: Math.max(acc, 1), color: "#3d8bff", weight: 1, fillOpacity: .08, interactive: false }).addTo(map);
     } else {
-      meMarker.setLatLng([lat, lon]);
+      meMarker.setLatLng([lat, lon]).setIcon(meIconFor(rough));
       meCircle.setLatLng([lat, lon]).setRadius(Math.max(acc, 1));
     }
-    meMarker.setPopupContent(manual ? "Your spot (set by hand)" : `You (GPS ±${Math.round(acc)} m)`);
+    if (firstGood && !manual && !userMoved && data) fitVisible();  // frame the WOs and you
+    meMarker.setPopupContent(manual ? "Your spot (set by hand)"
+      : rough ? `Rough guess, ±${miles(acc)} mi (no GPS here) - use 📍 Set my spot for the exact place`
+      : `You (${phone ? `${phone}'s ` : ""}GPS ±${Math.round(acc)} m)`);
     showMeState();
   }
   function showMeState(text) {
     const el = filterBox.querySelector("[data-mestate]");
-    if (el) el.textContent = text || (me ? (me.manual ? " · your spot" : " · GPS on") : " · waiting… or use 📍 Set my spot");
+    if (el) el.textContent = text || (me ? (me.manual ? " · your spot" : me.rough ? ` · rough guess (±${miles(me.acc)} mi) - 📍 Set my spot for exact` : me.phone ? ` · ${me.phone}'s GPS` : " · GPS on")
+      : " · waiting… or use 📍 Set my spot");
   }
   showMeState();
+  filterBox.querySelector("[data-findme]")?.addEventListener("click", () => {
+    if (!me) { toast("No location yet.", "warn"); return; }
+    map.setView([me.lat, me.lon], Math.max(map.getZoom(), me.rough ? 11 : 14));
+    meMarker?.openPopup();
+  });
+  // The test phones' GPS (read over USB by the app) comes first: this PC has no GPS - Chrome only
+  // guesses from the WiFi, which can be a city off. Chrome's location is used only without phones.
+  let phoneFixAt = 0;
+  async function pollPhones() {
+    try {
+      const { location: fix } = await api("/api/phones/location");
+      if (!fix || (me && me.manual)) return;
+      phoneFixAt = Date.now();
+      setMe(fix.lat, fix.lon, fix.acc, false, false, fix.phone);
+    } catch { /* no phones: Chrome's location */ }
+  }
+  pollPhones();
+  const phoneTimer = setInterval(pollPhones, 15000);
   let watchId = null;
-  if ("geolocation" in navigator) {
+  if (!window.isSecureContext) {
+    // Chrome gives location only to https or this PC (127.0.0.1 / localhost) - not http://<IP> on WiFi.
+    if (!me) showMeState(" · no phone GPS, and Chrome gives no location on http://<IP> - use 📍 Set my spot");
+  } else if ("geolocation" in navigator) {
     watchId = navigator.geolocation.watchPosition((p) => {
-      if (p.coords.accuracy > maxAccuracy) {
-        if (!me) showMeState(` · only a rough guess (±${(p.coords.accuracy / 1609).toFixed(0)} mi) - use 📍 Set my spot`);
-        return;
-      }
-      if (me && me.manual) return;
-      setMe(p.coords.latitude, p.coords.longitude, p.coords.accuracy, false);
-    }, (err) => { if (!me) showMeState(err.code === 1 ? " · location blocked - use 📍 Set my spot" : undefined); },
+      if ((me && me.manual) || Date.now() - phoneFixAt < 60000) return;  // the phones' GPS wins
+      const rough = p.coords.accuracy > maxAccuracy;  // a WiFi / internet-address guess: shown faded
+      if (rough && me && !me.rough) return;  // keep a real fix over a later rough guess
+      setMe(p.coords.latitude, p.coords.longitude, p.coords.accuracy, false, rough);
+    }, (err) => { if (!me) showMeState(err.code === 1 ? " · location blocked in Chrome (site settings / Windows location) - use 📍 Set my spot" : undefined); },
     { enableHighAccuracy: true, maximumAge: 5000, timeout: 20000 });
   }
 
@@ -353,16 +380,20 @@ function mountMap(L, root, mapEl) {
       <div class="mpActions">${action}
         <a class="btn btnGhost sm" href="#/records?wo=${w}">Open</a>
         <a class="btn btnGhost sm" href="${navUrl(p)}" target="_blank" rel="noopener">${icon("navigate", "sm")}Navigate</a>
-        <button class="btn btnGhost sm" data-copywo="${esc(p.wo)}">${icon("copy", "sm")}WO</button></div>
+        <button class="btn btnGhost sm" data-copywo="${esc(p.wo)}">${icon("copy", "sm")}WO</button>
+        <button class="btn btnGhost sm" data-locwo="${esc(p.wo)}" data-lat="${p.lat}" data-lon="${p.lon}" title="${esc(locationTarget().title)}">${icon("qr", "sm")}${locationTarget().apeksha ? "Apeksha" : "QR"}</button></div>
     </div>`;
   }
   mapEl.addEventListener("click", (e) => {
     const btn = e.target.closest?.("[data-copywo]");
     if (btn) copyWithFlash(btn, btn.dataset.copywo);
+    const loc = e.target.closest?.("[data-locwo]");  // QR code of the spot, or sent to Apeksha (Settings)
+    if (loc) shareLocation({ wo: loc.dataset.locwo, lat: loc.dataset.lat, long: loc.dataset.lon }, loc);
   });
 
   function fitVisible() {
     const pts = visiblePoints().map((p) => [p.lat, p.lon]);
+    if (me && !me.rough) pts.push([me.lat, me.lon]);  // you're in the frame too (not a miles-off guess)
     if (pts.length) map.fitBounds(L.latLngBounds(pts), { padding: [50, 50], maxZoom: 14 });
   }
 
@@ -429,7 +460,7 @@ function mountMap(L, root, mapEl) {
   let ordering = false;
   async function orderFromMe() {
     if (ordering || !seq) return;
-    if (!me) { toast("Waiting for your location - allow location access, or use 📍 Set my spot on the map first.", "warn", 5000); return; }
+    if (!me) { toast("No location yet.", "warn", 5000); return; }
     const stops = seq.plannedAll;
     if (!stops.length) { toast("Nothing left to drive today.", "warn"); return; }
     ordering = true;
@@ -553,10 +584,10 @@ function mountMap(L, root, mapEl) {
     const { done, doing, planned, missed, start, mode, route } = seq;
     let html = "";
     if (isToday() && route.length) {
-      html += `<div class="slHead"><span>To drive</span>
-        <small>${mode === "custom" ? `<span class="slTag">Your order · saved</span>` : mode === "shortest" ? "shortest order" : "planning…"}</small>
-        <button class="btn btnGhost sm slReset" data-fromme ${ordering ? "disabled" : ""} title="Shortest order from where you are now - once; then drag to adjust">${icon("navigate", "sm")}${ordering ? "Working it out…" : "From my location"}</button>
-        ${mode === "custom" ? `<button class="btn btnGhost sm slReset" data-reset>${icon("route", "sm")}Shortest</button>` : ""}</div>`;
+      html += `<div class="slHead"><div class="slTitle"><span>To drive</span>
+        <small>${mode === "custom" ? `<span class="slTag">Your order · saved</span>` : mode === "shortest" ? "shortest order" : "planning…"}</small></div>
+        <div class="slBtns"><button class="btn btnGhost sm slReset" data-fromme ${ordering ? "disabled" : ""} title="Shortest order from where you are now - once; then drag to adjust">${icon("navigate", "sm")}${ordering ? "Working it out…" : "From my location"}</button>
+        ${mode === "custom" ? `<button class="btn btnGhost sm slReset" data-reset>${icon("route", "sm")}Shortest</button>` : ""}</div></div>`;
       html += doing.map((p, i) => rowHtml(p, i + 1, false)).join("");
       html += planned.map((p, i) => rowHtml(p, doing.length + i + 1, true)).join("");
       if (planned.length > 1) html += `<div class="slHint">Drag ⋮⋮ to change the order - it's saved for ${esc(dayName(day))}.</div>`;
@@ -690,6 +721,7 @@ function mountMap(L, root, mapEl) {
     unsubscribe();
     resize.disconnect();
     if (watchId !== null) navigator.geolocation.clearWatch(watchId);
+    clearInterval(phoneTimer);
     map.remove();
   };
 }

@@ -94,7 +94,7 @@ export default {
     const redo = redoBox({ what: "ended", onRedo: (wos) => runAll(wos), onLater: async (forWo) => {
       try {
         await api(`/api/records/${enc(forWo)}/later`, { body: { kind: "end" } });
-        toast(`${forWo}: put off - it's in Records (End later) to pick up when you're ready.`, "ok", 6000);
+        toast(`${forWo}: End later.`, "ok", 6000);
         refreshState();
       } catch (error) { toast(error.message, "bad"); }
       loadRedo();
@@ -281,7 +281,7 @@ export default {
       // Not twice - a WO already shared is left for you to share again by hand.
       if (allDone && store.settings?.whatsappAutoShare !== false && box.get() === wo) {
         const missing = [!record?.ticketId && "Ticket ID", !record?.gridSummaryPath && "GridSummary file",
-          !record?.picture?.exists && "TEMS picture",
+          !record?.picture?.exists && !store.settings?.whatsappNoPicture && "TEMS picture",
           ...(settings.equipments || ["EQ3", "EQ6"]).filter((eq) => !record?.[eq.toLowerCase()])].filter(Boolean);
         if (missing.length) msg(`Not shared on WhatsApp yet - missing ${missing.join(", ")}.`, "warn");
         else if (record?.whatsappSentAt) msg("All done. Already shared on WhatsApp before - press WhatsApp to share again.", "ok");
@@ -383,16 +383,18 @@ export default {
       img.hidden = !has;
       q(".picEmpty").hidden = has;
       const badge = q(".picBadge");
-      badge.textContent = !record ? "" : has ? "Saved" : "Required";
-      badge.className = `badge picBadge ${!record ? "" : has ? "bGreen" : "bAmber"}`;
+      const optional = Boolean(store.settings?.whatsappNoPicture);  // Settings > WhatsApp: share without it
+      badge.textContent = !record ? "" : has ? "Saved" : optional ? "Optional" : "Required";
+      badge.className = `badge picBadge ${!record ? "" : has ? "bGreen" : optional ? "bGrey" : "bAmber"}`;
       q(".picPath").textContent = has ? `${pic.path}${pic.at ? ` · ${new Date(pic.at).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}` : ""}${pic.source ? ` · ${pic.source}` : ""}` : "";
       q(".picPickLabel").textContent = has ? "Replace" : "Add picture";
       q(".picPick").disabled = !record || busy;
       q(".picShow").disabled = !has;
       q(".picDrop").classList.toggle("off", !record);
       const wa = q(".wa");
-      wa.disabled = busy || (Boolean(record) && !has);
-      wa.title = record && !has ? "Add the TEMS picture first - it goes out with the CSV and the report" : "Share the CSV, the TEMS picture and the report";
+      wa.disabled = busy || (Boolean(record) && !has && !optional);
+      wa.title = record && !has && optional ? "Share the CSV and the report (no TEMS picture - allowed in Settings)"
+        : record && !has ? "Add the TEMS picture first - it goes out with the CSV and the report" : "Share the CSV, the TEMS picture and the report";
     }
     async function uploadPicture(file) {
       const wo = box.get();

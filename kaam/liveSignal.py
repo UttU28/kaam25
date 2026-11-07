@@ -38,6 +38,8 @@ def merge(serial):
     sm, an = screen.get(serial), android.get(serial)
     if sm and now - sm["at"] < screenFresh:
         merged = {**sm, "live": "serviceMode"}
+        if an and now - an["at"] < screenFresh and an.get("bars") is not None:
+            merged["bars"] = an["bars"]  # Service Mode has no bars: the status bar's, from Android
         if an and now - an["at"] < screenFresh and an.get("tech") == sm.get("tech"):
             for key in ("bw", "band"):  # Service Mode's NR page has no bandwidth: Android's
                 if not merged.get(key) and an.get(key):

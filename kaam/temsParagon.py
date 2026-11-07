@@ -14,7 +14,7 @@ import urllib.parse
 from .chromeBridge import ChromeBridgeError, bridgePort, openInChrome, runInChrome
 from .config import temsProject, temsUrl  # from .env (TEMS_*), with defaults
 
-actions = ("find", "go", "test", "play", "openWo", "suspend", "discard", "submit", "listWos", "results", "cloudLogin")
+actions = ("find", "go", "test", "play", "openWo", "suspend", "discard", "submit", "listWos", "results", "cloudLogin", "stationaryOk")
 # openWo  - Start Stationary when the WO isn't open: Assign -> the WO -> Open.
 # suspend / discard - on TEMS's finished-test page: Suspend (OK the "summary created") / Discard (Yes).
 # submit  - Chrome full window, Suspend, the WO's details on Assign scrolled to the bottom, a picture

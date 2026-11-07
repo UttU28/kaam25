@@ -20,7 +20,7 @@ if str(projectDir) not in sys.path:
 
 from flask import Flask, jsonify, request, send_file, send_from_directory  # noqa: E402
 
-from kaam import config, envSettings, workflows  # noqa: E402
+from kaam import config, envSettings, ticketFlow, workflows  # noqa: E402
 from kaam.chromeBridge import ChromeBridgeError, bridgeStatus, openInChrome, startBridge, stopAll  # noqa: E402
 from kaam.gridSummary import buildFolderName, showInExplorer  # noqa: E402
 from kaam.sheetImport import SheetImportError  # noqa: E402
@@ -428,7 +428,7 @@ def settings():
         "folderNamePrefix": config.folderNamePrefix, "whatsappGroup": config.whatsappGroup,
         "whatsappWoGroup": config.whatsappWoGroup, "teamsUrl": config.teamsUrl,
         "whatsappSend": config.whatsappSend, "whatsappRetries": config.whatsappRetries,
-        "whatsappAutoShare": config.whatsappAutoShare,
+        "whatsappAutoShare": config.whatsappAutoShare, "whatsappNoPicture": config.whatsappNoPicture,
         "temsTestMode": config.temsTestMode, "temsProject": config.temsProject, "temsAssignWo": config.temsAssignWo,
         "actixSubmit": config.actixSubmit, "closeTabsWhenDone": config.closeTabsWhenDone,
         "paths": {"Tickets file": str(config.ticketStoreFile), "Drive logs": str(config.logRootDir),
@@ -624,6 +624,16 @@ def qrCode():
     response = app.response_class(out.getvalue(), mimetype="image/svg+xml")
     response.headers["Cache-Control"] = "max-age=86400"
     return response
+
+
+@app.get("/api/phones/location")
+def phonesLocation():
+    """Where you are, from the test phones' GPS (Maps' "you" dot - the laptop has no GPS)."""
+    from kaam import phoneControl
+    try:
+        return jsonify({"location": phoneControl.phoneLocation()})
+    except Exception as error:
+        return jsonify({"location": None, "error": str(error)})
 
 
 @app.get("/api/connection")
@@ -1166,19 +1176,26 @@ def temsPlay(wo=""):
             return {"ok": False, "otherWo": check["otherWo"], "otherState": check["stateName"], "wantedWo": wo,
                     "error": otherWoMessage(wo, check)}
         if check.get("same") and check.get("state") == 8:  # its run is over, results waiting
+            if getRecord(wo) and not ticketFlow.currentRun(getRecord(wo)):  # ...an older ticket's run
+                return {"ok": False, "staleResults": True,
+                        "error": f"TEMS shows the results of an earlier run of {wo}, not this ticket's - nothing pressed. "
+                                 "Discard or suspend it in TEMS first (or, if you tested it by hand, press \"It's this ticket's run\")."}
             return {"ok": True, "summary": f"TEMS: {wo} has finished its run - Submit, Discard or Suspend it (nothing pressed)."}
         runWo = temsRunWo(wo)
-        if runWo:  # a new run: Live Testing follows TEMS again for this WO
-            from kaam.ticketStore import now as stamp
-            if getRecord(runWo):
-                workflows.safeSave(runWo, temsRunStartedAt=stamp())
-            endedRuns.pop(woKey(runWo), None)
+        if runWo:
+            noteFreshRun(runWo)  # before play: what TEMS shows of the old run
+            from kaam.chromeBridge import resetStationaryAlert
+            resetStationaryAlert(runWo)  # stationary fails are counted per run
         phones = threading.Thread(target=reopenPhones, args=(job.progress,), daemon=True)
         phones.start()
         try:
-            return startOnTems(job)
+            result = startOnTems(job)
         finally:
             phones.join(60)
+        said = result.get("summary") or ""
+        if runWo and result.get("ok") and ("started (Executing)" in said or "already running" in said):
+            markRunStarted(runWo, "Start Stationary" if "started" in said else "already running in TEMS")
+        return result
 
     def waitReady(job, before, stopOnCloud=True):
         """Up to ~2 min for Validated / Paused (or Executing: already running). Stops early when TEMS
@@ -1256,8 +1273,35 @@ def temsPlay(wo=""):
             return {"ok": False, "error": f"Pressed play, but {name} is {after['stateName']}"
                                           + (f" ({after['error']})" if after["error"] else "") + ". Check TEMS."}
         return result
+    ticketFlow.logClick(wo, "Start Stationary")
     job = startJob("tems", wo, "TEMS: start stationary", work)
     return jsonify({"job": job.toJson()})
+
+
+def newRunInTems(wo, record):
+    """TEMS is running the WO: is that a run the app doesn't know yet? Yes when this ticket has no
+    run, or its run was discarded / suspended. Never while Submit replays it, or once submitted."""
+    if (submitRuns.get(woKey(wo)) or {}).get("state") == "running":
+        return False
+    if not ticketFlow.currentRun(record):
+        return True
+    ended = runEnded(wo)
+    return bool(ended) and ended.get("as") in ("discard", "suspend")
+
+
+def markRunStarted(wo, how):
+    """TEMS runs the WO now: a new run for this ticket - unless its run is still going (play
+    resumed a paused run, or it was already running): then nothing changes."""
+    endedRuns.pop(woKey(wo), None)
+    record = getRecord(wo)
+    if not record:
+        return
+    if not ticketFlow.currentRun(record) or runEnded(wo):
+        from kaam.chromeBridge import resetStationaryAlert
+        resetStationaryAlert(wo)  # a new run: stationary fails count from 0
+        ticketFlow.runStarted(wo, how)
+    else:
+        workflows.safeSave(wo, event=f"TEMS: running ({how})")
 
 
 def saveTemsPicture(wo, dataUrl):
@@ -1296,14 +1340,53 @@ def markRunEnded(wo, action):
 
 endedRuns = {}  # WOs not in Records: kept here (until the app restarts)
 
+# A run just started with Start Stationary (after a Discard / Suspend, say): TEMS can still show the
+# old run's counts as all done for a while, and its tab's watcher can still say "complete". Until
+# TEMS's counts drop (the new run reset them), "complete" isn't believed - the pop-up shows stationary.
+freshRuns = {}  # woKey -> {"at": time, "stale": the old run's counts showed all done, "reset": seen them drop}
+freshGraceSeconds = 90  # no reading at the start: "complete" isn't believed this soon either
+
+
+def allDone(status):
+    stationary, mobility = status.get("stationary") or {}, status.get("mobility") or {}
+    total = (stationary.get("total") or 0) + (mobility.get("total") or 0)
+    return bool(total) and (stationary.get("done") or 0) >= (stationary.get("total") or 0)         and (mobility.get("done") or 0) >= (mobility.get("total") or 0)
+
+
+def noteFreshRun(wo):
+    from kaam import temsMap
+    try:
+        stale = allDone(temsMap.testStatus())
+    except Exception:
+        stale = None  # couldn't read: the grace time covers it
+    freshRuns[woKey(wo)] = {"at": time.time(), "stale": stale, "reset": False}
+
+
+def freshRunStage(wo, status, stage):
+    """The stage to show for a run that just started: "complete" from the old run -> "stationary"."""
+    run = freshRuns.get(woKey(wo)) if wo else None
+    if not run or run["reset"]:
+        return stage
+    if status.get("online") and not allDone(status):
+        run["reset"] = True  # the new run's counts are in: TEMS is right from here on
+        return stage
+    young = time.time() - run["at"] < freshGraceSeconds
+    if stage == "complete" and (run["stale"] or (run["stale"] is None and young)):
+        return "stationary"
+    return stage
+
 
 def runEnded(wo):
     """{"as": submit / discard / suspend, "at": iso} when this WO's last TEMS run was ended here
     after its last Start Stationary, else None."""
     if not wo:
         return None
-    record = getRecord(wo) or endedRuns.get(woKey(wo)) or {}
-    ended, started = record.get("temsRunEndedAt"), record.get("temsRunStartedAt")
+    record = getRecord(wo)
+    if record:  # only this ticket's run (an older ticket's end says nothing about this one)
+        ended, started = ticketFlow.mine(record, "temsRunEndedAt"), ticketFlow.currentRun(record)
+    else:
+        record = endedRuns.get(woKey(wo)) or {}
+        ended, started = record.get("temsRunEndedAt"), record.get("temsRunStartedAt")
     if ended and (not started or started < ended):
         return {"as": record.get("temsRunEnd") or "", "at": ended}
     return None
@@ -1361,11 +1444,16 @@ class SubmitRun:
 
 
 def submitRunFor(wo=""):
-    """The Submit run to show: this WO's, else the latest one - unless it was closed. A run the
-    app was in the middle of when it restarted shows as stuck."""
+    """The Submit run to show: this WO's (this ticket's), else (no WO given) the latest one - unless
+    it was closed. A run the app was in the middle of when it restarted shows as stuck."""
     run = submitRuns.get(woKey(wo)) if wo else None
+    start = ticketFlow.ticketStart(getRecord(wo)) if wo else ""
+    if run and start and (run.get("startedAt") or "") < start:
+        run = None  # an older ticket's Submit
     if not run and wo:
         saved = (getRecord(wo) or {}).get("temsSubmit")
+        if saved and start and (saved.get("startedAt") or "") < start:
+            saved = None
         if saved:
             run = dict(saved)
             if run.get("state") == "running":
@@ -1373,7 +1461,7 @@ def submitRunFor(wo=""):
                 run.update(state="failed", failedAt=at, error="The app restarted while it was submitting.")
                 run.setdefault("steps", {})[at] = "failed"
             submitRuns[woKey(wo)] = run
-    if not run and lastSubmit["key"]:
+    if not run and not wo and lastSubmit["key"]:
         run = submitRuns.get(lastSubmit["key"])
     return run if run and not run.get("closed") else None
 
@@ -1466,6 +1554,7 @@ def temsEnd(action, wo=""):
     Every one of them ends the run here: Live Testing no longer shows it as a test."""
     from kaam.chromeBridge import setTemsStage
     runWo = temsRunWo(wo) or wo
+    ticketFlow.logClick(runWo, action.capitalize())
     track = {}
     already = (submitRuns.get(woKey(runWo)) or {}).get("state") == "running"
     if action == "submit" and not already:  # (already running: startJob hands back that job)
@@ -1508,6 +1597,7 @@ def temsEnd(action, wo=""):
                 result["summary"] = f"{result['summary']} {text}"
                 if ok:
                     run.finish()
+                    ticketFlow.checkOut(runWo, "Submit")
                 else:
                     result.update(ok=False, error=f"{result['summary']}")
             else:
@@ -1552,6 +1642,8 @@ def temsSubmitDoneByHand():
     if not run:
         return fail("No Submit to mark.")
     wo = run.get("wo") or ""
+    ticketFlow.logClick(wo, "Yes, I did it (Submit by hand)")
+    ticketFlow.checkOut(wo, "submitted by hand")
     run.update(state="done", byHand=True, endedAt=datetime.now().isoformat(timespec="seconds"))
     setTemsStage("closed", wo)
     markRunEnded(wo, "submit")
@@ -1568,8 +1660,10 @@ def temsStatusNow():
     the TEMS tab's watcher when it reported in the last 2 minutes (it sees TEMS's screen). The
     further-along of the two wins. stage: idle / ready / stationary / mobility / complete / paused /
     failed / closed, or "" when TEMS can't be read."""
-    from kaam import temsMap
+    from kaam import gridWatch, temsMap
     from kaam.chromeBridge import temsStage
+    pageWo = workflows.cleanWorkOrder(request.args.get("wo", ""))
+    gridWatch.watch(pageWo)  # check-in: is the car in this WO's grid yet?
     order = {"stationary": 1, "mobility": 2, "complete": 3}
     age = time.time() - temsStage["at"] if temsStage["at"] else None
     watched = temsStage["stage"] if age is not None and age < 120 else ""
@@ -1578,6 +1672,9 @@ def temsStatusNow():
         status["online"] = True
     except Exception as error:
         status = {"online": False, "error": str(error), "stage": "", "wo": temsStage["wo"] or ""}
+    fresh = freshRuns.get(woKey(status.get("wo") or temsStage["wo"] or ""))
+    if fresh and temsStage["at"] and temsStage["at"] < fresh["at"]:
+        watched = ""  # the TEMS tab said that about the run before this Start Stationary
     stage, source = status.get("stage", ""), "tems"
     if watched == "closed" and stage not in ("stationary", "mobility", "complete"):
         stage, source = "closed", "watcher"
@@ -1585,14 +1682,83 @@ def temsStatusNow():
         stage, source = watched, "watcher"
     # Ended here (Submit / Discard / Suspend): TEMS may still show that run's data, Submit reopens
     # the WO, the TEMS tab may still say "complete" - none of it is a test any more.
-    ended = runEnded(status.get("wo") or temsStage["wo"])
+    fixed = freshRunStage(status.get("wo") or temsStage["wo"], status, stage)
+    if fixed != stage:
+        stage, source = fixed, "freshRun"
+    # the WO TEMS has: from TEMS, else from the TEMS tab only while its report is recent
+    temsWo = status.get("wo") or (temsStage["wo"] if age is not None and age < 120 else "") or ""
+    wo = pageWo or temsWo
+    record = getRecord(wo) if wo else None
+    otherWo = ""
+    if pageWo and temsWo and not sameWo(pageWo, temsWo):
+        # TEMS has another WO: its run, results or Submit say nothing about this one
+        otherWo, stage, source = temsWo, "otherWo", "app"
+    elif record and status.get("online") and status.get("state") == temsMap.executing and newRunInTems(wo, record):
+        markRunStarted(wo, "started in TEMS")  # running now and not a run of ours: started by hand in TEMS
+    elif record and stage in ("stationary", "mobility", "complete", "paused", "failed") \
+            and not ticketFlow.currentRun(record):
+        stage, source = "stale", "app"  # an earlier ticket's stationary test / results page
+    if stage in ("mobility", "complete") and record:
+        ticketFlow.noteStage(wo, stage)
+    ended = runEnded(wo)
     if ended:
         stage, source = "ended", "app"
-    # Submit's steps (running, done or stuck) until its pop-up is closed
-    submit = submitRunFor(status.get("wo") or temsStage["wo"])
-    status.update(stage=stage, source=source, watcherStage=watched, watcherAge=age, ended=ended,
+    # Submit's steps (running, done or stuck) until its pop-up is closed - this WO's only
+    submit = submitRunFor(wo)
+    record = getRecord(wo) if wo else None
+    checkIn = {"at": ticketFlow.mine(record, "checkInTime"), "source": record.get("checkInSource") or ""} \
+        if record and ticketFlow.mine(record, "checkInTime") else None
+    from kaam.chromeBridge import stationaryAlert
+    alertWo = stationaryAlert["wo"] or temsWo
+    alert = stationaryAlert if (stationaryAlert["fails"] or stationaryAlert["waiting"]) and wo and sameWo(alertWo, wo) else None
+    status["stationaryFail"] = {k: alert[k] for k in ("fails", "waiting", "ack")} if alert else None
+    status.update(stage=stage, source=source, watcherStage=watched, watcherAge=age, ended=ended, otherWo=otherWo,
+                  pageWo=pageWo, temsWo=temsWo, checkIn=checkIn, grid=gridWatch.state["last"] if pageWo else "",
+                  flow=ticketFlow.flow(record) if record else [],
+                  clicks=(record.get("clicks") or [])[-8:] if record else [],
                   submit=dict(submit, labels=dict(submitSteps), order=[k for k, _ in submitSteps]) if submit else None)
     return jsonify(status)
+
+
+@app.post("/api/tems/stationaryRedo")
+def temsStationaryRedo():
+    """The stationary test failed and TEMS asks to start it again: Redo = press its OK."""
+    from kaam.chromeBridge import stationaryAlert
+    wo = workflows.cleanWorkOrder(body().get("wo", ""))
+    ticketFlow.logClick(wo, "Redo stationary test", f"failed {stationaryAlert['fails']}x")
+    stationaryAlert.update(waiting=False, ack=stationaryAlert["fails"])
+    job = startJob("tems", wo, "TEMS: stationary test again (OK)", lambda job: runTems("stationaryOk", wo=wo, timeout=60))
+    return jsonify({"job": job.toJson()})
+
+
+@app.post("/api/tems/stationaryCancel")
+def temsStationaryCancel():
+    """The stationary test failed: Cancel = leave TEMS's pop-up alone, don't ask again for these fails."""
+    from kaam.chromeBridge import stationaryAlert
+    data = body()
+    wo = workflows.cleanWorkOrder(data.get("wo", ""))
+    fails = stationaryAlert["fails"]
+    if data.get("skip"):  # failed 3 times or more: skipped, the ticket says so
+        ticketFlow.logClick(wo, "Skip stationary", f"failed {fails}x")
+        if wo and getRecord(wo):
+            workflows.safeSave(wo, event=f"Stationary skipped - failed {fails} times",
+                               stationarySkippedAt=datetime.now().isoformat(timespec="seconds"), stationaryFails=fails)
+    else:
+        ticketFlow.logClick(wo, "Cancel (stationary test failed)", f"failed {fails}x")
+    stationaryAlert.update(waiting=False, ack=fails)
+    return jsonify({"ok": True})
+
+
+@app.post("/api/tems/adoptRun")
+def temsAdoptRun():
+    """\"It's this ticket's run\": what TEMS shows (tested by hand, outside the app) counts for this ticket."""
+    wo = workflows.cleanWorkOrder(body().get("wo", ""))
+    if not wo or not getRecord(wo):
+        return fail("Pick a WO that's in Records.")
+    ticketFlow.logClick(wo, "It's this ticket's run")
+    ticketFlow.runStarted(wo, "by hand in TEMS")
+    freshRuns.pop(woKey(wo), None)
+    return jsonify({"ok": True})
 
 
 @app.get("/api/tems/stage")
@@ -1612,8 +1778,9 @@ liveActions = {
     "speedtest": "Speed test",
     "airplane": "Airplane toggle",
     "hotspot": "Hotspot on the best phone",
+    "airplaneAll": "Airplane toggle on both",
 }
-deskActions = ("desk", "closePhones", "fullTestAll", "hotspot")  # use both phones: nothing else at the same time
+deskActions = ("desk", "closePhones", "fullTestAll", "hotspot", "airplaneAll")  # use both phones: nothing else at the same time
 liveLock = threading.Lock()  # the "is something else running?" check and the start, as one step
 
 
@@ -1646,6 +1813,9 @@ def liveSignal():
         if reading:
             out[name] = {**{k: v for k, v in reading.items() if k != "at"}, "age": round(now - reading["at"], 1),
                          "text": phoneControl.networkText(reading)}
+        speed = phoneControl.liveSpeeds.get(name)  # its speed test's live gauge, while running
+        if speed and now - speed["at"] < 5:
+            out.setdefault(name, {})["speed"] = {"value": speed["value"], "label": speed["label"]}
     return jsonify({"phones": out})
 
 
@@ -1708,6 +1878,7 @@ def saveSpeedTest(wo, result):
     tests.append({"phone": result.get("phone"), "download": result.get("download"), "ping": result.get("ping"),
                   "pingLoaded": result.get("pingLoaded"), "resultId": result.get("resultId"),
                   "network": result.get("network"), "error": result.get("error"),
+                  "location": result.get("location"), "runId": result.get("runId"),
                   "at": datetime.now().isoformat(timespec="seconds")})
     return workflows.safeSave(wo, event=f"Speed test {speedResultText(result)}", speedTests=tests)
 
@@ -1740,6 +1911,7 @@ def liveRun():
 
     def keep(job, result):
         """Shows the result on the page at once and saves it on the WO."""
+        result["runId"] = job.id  # Test All's NR + LTE results share one spot on the map
         job.post("results", (job.data.get("results") or []) + [result])
         if wo:
             problem = saveSpeedTest(wo, result)
@@ -1775,6 +1947,12 @@ def liveRun():
                 if not serials:
                     raise RuntimeError("Neither TMO 1 nor TMO 2 (Settings > Phones) is connected.")
                 return phoneControl.hotspotAfterAirplane(serials)
+            if action == "airplaneAll":  # airplane on and off on both phones at once
+                connected = set(phoneControl.connectedSerials())
+                serials = [s for s in phoneControl.configuredPhones().values() if s in connected]
+                if not serials:
+                    raise RuntimeError("Neither TMO 1 nor TMO 2 (Settings > Phones) is connected.")
+                return phoneControl.airplaneAll(serials)
             serial = phoneControl.pickPhones([phone])[0]
             if action == "airplane":  # just re-attach to the network; no test, nothing saved
                 if phoneControl.toggleAirplane(serial):
@@ -1790,6 +1968,7 @@ def liveRun():
     # Hotspot use both phones, so they wait for everything and everything waits for them.
     title = liveActions[action] + (f" · {phone}" if action in ("fullTest", "speedtest", "airplane") else "")
     lane = action if action in deskActions else phone
+    ticketFlow.logClick(wo, title)
     with liveLock:
         running = next((j for j in runningJobs("live")
                         if action in deskActions or j.wo in deskActions or j.wo == lane), None)
@@ -1797,6 +1976,51 @@ def liveRun():
             return fail(f"Wait for \"{running.title}\" to finish (or press Stop).")
         job = startJob("live", lane, title, work)
     return jsonify({"job": job.toJson()})
+
+
+@app.post("/api/live/reboot")
+def liveReboot():
+    """Restart both phones at the same time. Nothing waits for it: the other buttons stay free."""
+    from kaam import phoneControl
+    try:
+        connected = set(phoneControl.connectedSerials())
+    except Exception as error:
+        return fail(error, 503)
+    phones = {name: serial for name, serial in phoneControl.configuredPhones().items() if serial in connected}
+    if not phones:
+        return fail("Neither TMO 1 nor TMO 2 (Settings > Phones) is connected.")
+    ticketFlow.logClick(workflows.cleanWorkOrder(body().get("wo", "")), "Restart phones")
+    for serial in phones.values():
+        threading.Thread(target=phoneControl.runAdb, args=(["reboot"],), kwargs={"serial": serial, "timeout": 30},
+                         daemon=True, name=f"reboot {serial}").start()
+    return jsonify({"ok": True, "summary": f"Restarting {' and '.join(phones)} - back in about a minute."})
+
+
+def setupDeskOnCheckIn(wo, kind, info):
+    """In the grid for the first time: Set up desk by itself, so the phones are ready - unless a
+    phone job is running (a speed test isn't interrupted)."""
+    if kind != "checkIn":
+        return
+    from kaam import phoneControl
+    from kaam.deskLayout import setupDesk
+
+    def work(job):
+        phoneControl.listenHere(job.progress)
+        try:
+            setupDesk()
+            return f"{wo}: entered the grid - desk ready."
+        finally:
+            phoneControl.listenHere(None)
+    with liveLock:
+        playing = any("start stationary" in (j.title or "").lower() for j in runningJobs("tems"))
+        if runningJobs("live") or playing:  # never in the middle of a speed test or Start Stationary's phone reopen
+            workflows.safeSave(wo, event="Entered the grid: Set up desk skipped (phones busy)")
+            return
+        startJob("live", "desk", "Set up desk (entered the grid)", work)
+    workflows.safeSave(wo, event="Entered the grid: Set up desk started by itself")
+
+
+ticketFlow.listeners.append(setupDeskOnCheckIn)
 
 
 # ---------- jobs ----------

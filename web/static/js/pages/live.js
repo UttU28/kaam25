@@ -34,6 +34,20 @@ function netChip(network, withBand = true) {
   const band = withBand ? [network?.band, network?.bw && `${network.bw} MHz`].filter(Boolean).join(" · ") : "";
   return `<span class="netChip ${cls}">${esc(tech)}${band ? ` <span style="font-weight:650">${esc(band)}</span>` : ""}</span>`;
 }
+// Bars like the phone's status bar (0-4).
+function barsHtml(network) {
+  const n = network?.bars;
+  if (n == null) return "";
+  const cls = n >= 3 ? "good" : n === 2 ? "ok" : n === 1 ? "weak" : "bad";
+  return `<span class="bars ${cls}" title="${n} of 4 bars">${[1, 2, 3, 4].map((k) => `<i class="${k <= n ? "on" : ""}"></i>`).join("")}</span>`;
+}
+// The speed test's live number (from the phone's Speedtest gauge).
+function liveSpeedHtml(speed) {
+  if (!speed?.value) return "--.--";
+  const unit = speed.label === "ping" ? "ms" : "Mbps";
+  const arrow = speed.label === "upload" ? "↑ " : speed.label === "download" ? "↓ " : "";
+  return `${arrow}${esc(speed.value)}<small>${unit}</small>`;
+}
 function netLine(network) {
   if (!network) return "";
   return [network.pci && `PCI ${network.pci}`, network.rsrp && `RSRP ${network.rsrp}`,
@@ -92,7 +106,6 @@ export default {
               <button class="btn btnPrimary lg" data-action="desk" title="Unlocks the phones, sets up Service Mode + Speedtest and Vysor where missing (skips what is already done), Chrome on the left half, TMO 1 and TMO 2 a quarter each on the right">${icon("desk")}<span>Set up desk</span></button>
               <button class="btn btnGhost lg" data-action="closePhones" title="Closes the TMO 1 and TMO 2 windows in Vysor (the phones keep running) - press Set up desk to open them again">${icon("x")}<span>Close phones</span></button>
               <button class="btn btnGhost lg" data-action="hotspot" title="Airplane toggle on both phones at the same time (that turns any old hotspot off). Once the first is back online it waits 2s more, then turns Mobile Hotspot on on the best of the phones back by then (NR first, then the stronger signal) - a phone slow to load the network is left out. Same name and password on both, so devices just reconnect.">${icon("hotspot")}<span>Hotspot</span></button>
-              <button class="btn btnPurple lg" data-action="temsPlay" title="Closes and reopens the phones; in TEMS opens the WO from Assign if it isn't open, waits till it's ready (green), then Control and play - then stays on TEMS">${icon("play")}<span class="temsPlayLabel">Start Stationary</span></button>
               <button class="btn btnGreen lg" data-action="fullTestAll" title="Service Mode + Speedtest where missing, airplane toggle on both phones at the same time, then the speed tests one phone after the other (NR phones first, then LTE)">${icon("gauge")}<span>Test All</span></button>
             </div>
             </div>
@@ -106,12 +119,20 @@ export default {
             </div>
             <div class="liveHint allHint"></div>
             <div class="runNote" hidden></div>
+            <div class="flowStrip"></div>
             <div class="msg"></div>
           </div>
         </div>
         <div class="liveMain">
           <div class="mapSlot"></div>
-          <div class="liveGrid phones"></div>
+          <div class="phoneSide">
+            <div class="netBar">
+              <button class="btn btnPurple" data-action="temsPlay" title="Closes and reopens the phones; in TEMS opens the WO from Assign if it isn't open, waits till it's ready (green), then Control and play - then stays on TEMS">${icon("play", "sm")}<span class="temsPlayLabel">Start Stationary</span></button>
+              <button class="btn btnGhost" data-action="airplaneAll" title="Airplane mode on and off on TMO 1 and TMO 2 at the same time (re-attach both to the network) - no speed test">${icon("plane", "sm")}<span>Airplane</span></button>
+              <button class="btn btnGhost rebootBtn" data-reboot title="Restart TMO 1 and TMO 2 at the same time (asks first). Nothing waits for it.">${icon("power", "sm")}</button>
+            </div>
+            <div class="liveGrid phones"></div>
+          </div>
         </div>
         <div class="jobSlot"></div>
         <div class="card liveWo">
@@ -150,7 +171,9 @@ export default {
         const next = rec ? newWo : "";
         // A different WO: nothing from the one before (last speeds, job log) is left showing.
         if (next !== wo && !busy()) { clearLast(); hideJobs(); }
+        const changed = next !== wo;
         wo = next; record = rec; paintWo(); paintPhones();
+        if (changed) setTimeout(resetRun);
       },
       onEnter: () => {},
     });
@@ -167,7 +190,44 @@ export default {
       return top;
     }
 
+    // ---------- speed tests on the map: where each ran (the phone's GPS), NR / LTE and Mbps ----------
+    const metres = (a, b) => {
+      const k = Math.PI / 180, x = (b.lon - a.lon) * k * Math.cos(((a.lat + b.lat) / 2) * k), y = (b.lat - a.lat) * k;
+      return Math.sqrt(x * x + y * y) * 6371000;
+    };
+    const techCls = (t) => ({ NR: "nr", LTE: "lte", "No service": "none" }[techOf(t.network)] || "unknown");
+    function speedPins() {
+      const placed = tests().filter((t) => t.location && Number.isFinite(t.location.lat));
+      const bestOf = {};  // the fastest test per NR / LTE: its pin is gold
+      for (const t of placed) { const tech = techOf(t.network); if (mbps(t) && mbps(t) > mbps(bestOf[tech])) bestOf[tech] = t; }
+      // One pin per test; Test All's NR + LTE (same run, within 15 m) share one.
+      const groups = [];
+      for (const t of placed) {
+        const g = t.runId && groups.find((x) => x.runId === t.runId && metres(x.spot, t.location) <= 15);
+        if (g) g.tests.push(t); else groups.push({ runId: t.runId, spot: t.location, tests: [t] });
+      }
+      return groups.map((g) => {
+        const best = g.tests.some((t) => Object.values(bestOf).includes(t));
+        const html = `<div class="spPin${best ? " best" : ""}">${g.tests.map((t) =>
+          `<div class="spL ${techCls(t)}"><b>${esc(techOf(t.network))}</b>${t.error || !t.download ? "no speed" : esc(t.download)}${Object.values(bestOf).includes(t) ? " ★" : ""}</div>`).join("")}</div>`;
+        const { lat, lon } = g.spot;
+        const popup = `<div class="spPop">${g.tests.map((t) => `<div class="spRow">
+            <div>${netChip(t.network)} <b class="spMbps">${t.error || !t.download ? "No speed" : `${esc(t.download)} Mbps`}</b>${Object.values(bestOf).includes(t) ? ` <span class="badge bGreen">Best ${esc(techOf(t.network))}</span>` : ""}</div>
+            <div class="spMeta">${esc(t.phone)} · ping ${esc(t.ping || "?")} · ${time(t.at)}${t.error ? ` · ${esc(t.error)}` : ""}</div>
+            <div class="spMeta">${esc(netLine(t.network) || "")}</div></div>`).join("")}
+          <div class="spMeta mono">${lat.toFixed(6)}, ${lon.toFixed(6)} · ±${Math.round(g.spot.acc || 0)} m</div>
+          <div class="spBtns"><a class="btn btnPrimary sm" href="https://www.google.com/maps/dir/?api=1&destination=${lat},${lon}&travelmode=driving" target="_blank" rel="noopener">${icon("navigate", "sm")}Go back here</a>
+            <button class="btn btnGhost sm" data-copyspot="${lat.toFixed(6)}, ${lon.toFixed(6)}">${icon("copy", "sm")}Lat, long</button></div></div>`;
+        return { lat, lon, html, popup, best };
+      });
+    }
+    root.addEventListener("click", (e) => {
+      const b = e.target.closest?.("[data-copyspot]");
+      if (b) copyText(b.dataset.copyspot).then((ok) => toast(ok ? "Copied the spot" : "Copy failed", ok ? "ok" : "bad"));
+    });
+
     function paintWo() {
+      temsMap.setSpeedPins(wo ? speedPins() : []);
       const r = record;
       q(".woHint").textContent = wo ? `${tests().length} test${tests().length === 1 ? "" : "s"}` : "";
       q(".woInfo").innerHTML = r ? [
@@ -239,7 +299,7 @@ export default {
         const driving = open.filter((r) => !r.resultReady && r.wo !== wo)
           .sort((a, b) => (b.startedAt || "").localeCompare(a.startedAt || ""))[0];
         if (!driving || busy()) return;
-        toast(`${wo}: result file is in. Switched to ${driving.wo}.`, "ok", 6000);
+        toast(`${wo} done - now ${driving.wo}.`, "ok", 6000);
         box.set(driving.wo);
       }).catch(() => {});
     }
@@ -286,7 +346,7 @@ export default {
             <div class="cardBody">
               <div class="phoneHead">
                 <h2>${icon("phone", "sm")}${esc(p.name)}</h2>
-                <span class="chipSlot" data-phone="${esc(p.name)}">${p.connected ? netChip(live[p.name] || p.network, false) : ""}</span>
+                <span class="chipSlot" data-phone="${esc(p.name)}">${p.connected ? netChip(live[p.name] || p.network, false) + barsHtml(live[p.name] || p.network) : ""}</span>
                 <span class="spacer"></span>
                 <span class="hint mono">${esc(p.serial)}</span>
               </div>
@@ -294,7 +354,7 @@ export default {
               <div class="stateDots">${dots}</div>
               <div class="speedRow">
                 ${pending.includes(p.name)
-                  ? `<div class="speedBig dim">--.--</div>
+                  ? `<div class="speedBig liveSpeed ${live[p.name]?.speed ? "" : "dim"}" data-phone="${esc(p.name)}">${liveSpeedHtml(live[p.name]?.speed)}</div>
                      <div class="speedMeta"><span class="spinner"></span> <b>${testing.has(p.name) ? "Testing now…" : "Waiting its turn…"}</b><br>waiting for the result</div>`
                   : `${speed(r)}
                 <div class="speedMeta">${r ? `${r.error ? esc(r.error) : `ping <b>${esc(r.ping || "?")}</b>`} · ${time(r.at)}${r.network ? ` · ${esc(techOf(r.network))}` : ""}` : "No test yet"}
@@ -308,7 +368,7 @@ export default {
             </div>
           </div>`;
       }).join("");
-      for (const b of root.querySelectorAll("button[data-action='desk'], button[data-action='closePhones'], button[data-action='hotspot'], button[data-action='fullTestAll']")) b.disabled = busy();
+      for (const b of root.querySelectorAll("button[data-action='desk'], button[data-action='closePhones'], button[data-action='hotspot'], button[data-action='airplaneAll'], button[data-action='fullTestAll']")) b.disabled = busy();
     }
 
     // Live signal: only the chip and the strip change (buttons stay put while you press them).
@@ -319,7 +379,9 @@ export default {
           for (const [name, net] of Object.entries(live)) {
             const chip = root.querySelector(`.chipSlot[data-phone="${CSS.escape(name)}"]`);
             const slot = root.querySelector(`.sigSlot[data-phone="${CSS.escape(name)}"]`);
-            if (chip) chip.innerHTML = netChip(net, false);
+            const speedNow = root.querySelector(`.liveSpeed[data-phone="${CSS.escape(name)}"]`);
+            if (chip) chip.innerHTML = netChip(net, false) + barsHtml(net);
+            if (speedNow) { speedNow.innerHTML = liveSpeedHtml(net.speed); speedNow.classList.toggle("dim", !net.speed); }
             if (slot) slot.innerHTML = sigHtml(net, true);
           }
         } catch { /* server busy: try again */ }
@@ -330,16 +392,18 @@ export default {
     // Start Stationary: phones reopened; TEMS opens the WO from Assign if needed, waits till it's
     // green, then Control and play (the server checks TEMS's state first).
     let temsBusy = false;
-    async function temsJob(body, buttons, onLine = () => {}) {
-      if (temsBusy) return;
+    async function temsJob(body, buttons, onLine = () => {}, quietFail = false) {
+      if (temsBusy) return null;
+      let done = null;
       temsBusy = true; buttons.forEach((b) => (b.disabled = true));
       let linesShown = 0;
       try {
         const { job: started } = await api("/api/tems", { body });
-        const done = await job.run(started, (j) => {
+        done = await job.run(started, (j) => {
           (j.lines || []).slice(linesShown).forEach((line) => { stepToast(line.text); onLine(line.text); });
           linesShown = (j.lines || []).length;
         });
+        const failed = done.state !== "done" || done.result?.ok === false;
         const text = done.state === "done" ? (done.result?.summary || done.result?.error) : done.error || "Stopped.";
         if (done.result?.otherWo) {  // TEMS has a different WO active: say so, nothing was pressed
           await modal({
@@ -349,13 +413,42 @@ export default {
               Finish, suspend or close <b>${esc(done.result.otherWo)}</b> in TEMS first - or pick it here as the WO under test.`,
             buttons: [{ label: "OK", value: true, cls: "btnPrimary" }],
           });
-        } else toast(text, done.state === "done" && done.result?.ok !== false ? "ok" : "bad", 10000);
-      } catch (error) { toast(error.message, "bad", 8000); }
+        } else if (!(failed && quietFail)) toast(text, failed ? "bad" : "ok", 10000);
+      } catch (error) { done = { state: "error", error: error.message }; if (!quietFail) toast(error.message, "bad", 8000); }
       finally { temsBusy = false; buttons.forEach((b) => (b.disabled = false)); pollStage(true); }
+      return done;
     }
-    const startTems = (button) => {
+    // One start per press: never pressed again by itself. Already testing this WO -> ask first.
+    // Didn't go through -> say why and let you decide: Try again or Not now.
+    const startTems = async (button) => {
+      if (temsBusy) return;
+      const forWo = wo || status.temsWo || "the WO TEMS has open";
+      const testing = ["stationary", "mobility", "complete"].includes(stage);
+      const mobility = stage === "mobility";
+      if (!(await modal(testing && !mobility ? {
+        title: "This WO is already being tested",
+        body: `<b>${esc(forWo)}</b> is at <b>${esc(stage)}</b> in TEMS.\n\nStart it again anyway?`,
+        buttons: [{ label: "Cancel", value: false }, { label: "Start again", value: true, cls: "btnPrimary" }],
+      } : {
+        title: mobility ? "Start Mobility?" : "Start Stationary?",
+        body: `On <b>${esc(forWo)}</b>: the phones are reopened, TEMS opens the WO if needed, waits till it's ready (green) and presses play once.`,
+        buttons: [{ label: "Cancel", value: false }, { label: mobility ? "Start Mobility" : "Start Stationary", value: true, cls: "btnPrimary" }],
+      }))) return;
       starting = true; paintPop();
-      return temsJob({ action: "play", wo }, [button], (line) => pop.working(line)).finally(() => { starting = false; pollStage(true); });
+      const done = await temsJob({ action: "play", wo }, [button], (line) => pop.working(line), true);
+      starting = false; pollStage(true); paintPop();
+      const failed = done && !done.result?.otherWo && (done.state !== "done" || done.result?.ok === false);
+      if (!failed || done.state === "stopped") return;
+      if (done.result?.staleResults) {
+        await modal({ title: "Nothing pressed", body: esc(done.result.error), buttons: [{ label: "OK", value: true, cls: "btnPrimary" }] });
+        return;
+      }
+      const again = await modal({
+        title: "Start Stationary didn't go through",
+        body: `${esc(done.result?.error || done.error || "TEMS didn't say why.")}\n\nNothing else is pressed until you decide.`,
+        buttons: [{ label: "Not now", value: false }, { label: "Try again", value: true, cls: "btnPrimary" }],
+      });
+      if (again) startTems(button);
     };
 
     // ---------- where the TEMS test is: read from TEMS itself (also after a restart) ----------
@@ -383,7 +476,7 @@ export default {
         const target = status.wo || wo || "this WO";
         const sure = await modal({
           title: "Discard this test?",
-          body: `Discard <b>${esc(target)}</b> in TEMS?\n\nIts test run is thrown away - you'll test this WO again with Start Stationary.`,
+          body: `Discard <b>${esc(target)}</b> in TEMS?\n\nIts test run is thrown away, then the WO is opened again in TEMS (Map page, play not pressed) - you pick what's next.`,
           buttons: [{ label: "Cancel", value: false }, { label: "Yes, discard", value: true, cls: "btnDanger" }],
         });
         if (!sure) return;
@@ -396,7 +489,7 @@ export default {
     // Submit's own screen: its steps, the result form, and Close once it's done (or "did you
     // finish it by hand?" when it got stuck). Stays until Close, also after a reload / restart.
     pop.onSubmitDone = async (forWo) => {
-      try { await api("/api/tems/submit/done", { body: { wo: forWo } }); toast(`${forWo}: marked submitted - done and dusted.`, "ok", 6000); refreshState(); }
+      try { await api("/api/tems/submit/done", { body: { wo: forWo } }); toast(`${forWo}: submitted.`, "ok", 6000); refreshState(); }
       catch (error) { toast(error.message, "bad"); }
       pollStage(true);
     };
@@ -411,6 +504,69 @@ export default {
       const shown = starting ? "starting" : status.submit || ending === "submit" ? "submit" : ending ? `ending-${ending}` : stage;
       pop.show(shown, status, { pageWo: wo, ending });
     }
+    // A different WO: clean slate - no stage, pop-up, note or steps from the WO before.
+    function resetRun() {
+      stage = ""; status = {}; starting = false; ending = ""; seenCheckIn = undefined; failsSeen = 0;
+      q(".temsEnd").hidden = true; q(".runNote").hidden = true; q(".flowStrip").innerHTML = "";
+      q(".temsPlayLabel").textContent = "Start Stationary";
+      paintPop();
+      pollStage(true);
+    }
+    // The ticket's steps: done, skipped (a later one is done), where we are.
+    function paintFlow(flow) {
+      const at = (t) => t ? new Date(t).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "";
+      q(".flowStrip").innerHTML = flow.length ? flow.map((f) => `<span class="fStep ${f.state}" title="${esc(
+        f.state === "done" ? `${f.label}: ${new Date(f.at).toLocaleString()}${f.how ? ` (${f.how})` : ""}`
+          : f.state === "skipped" ? `${f.label}: skipped - a later step is done (done by hand, or not at all)`
+            : f.state === "current" ? `${f.label}: next` : f.label)}">${f.state === "done" ? icon("check", "sm") : f.state === "skipped" ? icon("alert", "sm") : ""}<b>${esc(f.label)}</b>${f.state === "done" ? `<i>${esc(at(f.at))}</i>` : f.state === "skipped" ? "<i>skipped</i>" : ""}</span>`).join("") : "";
+    }
+    // In the grid for the first time (check-in): beep 3 times, say so. The server sets up the desk.
+    let seenCheckIn;  // undefined until the first answer for this WO
+    function checkInBeep(checkIn) {
+      const at = checkIn?.at || "";
+      const fresh = at && Date.now() - new Date(at).getTime() < 60000;
+      if (at && at !== seenCheckIn && (seenCheckIn !== undefined || fresh)) {
+        beep(3);
+        toast(`Entered the grid - setting up desk`, "ok", 6000);
+      }
+      seenCheckIn = at;
+    }
+    // The stationary test failed in TEMS: say so (with how many times this run), and only press
+    // TEMS's "start the stationary test" OK when you choose Redo.
+    let failAsking = false, failsSeen = 0;
+    const maxTries = 3;  // stationary tries before it can be skipped as failed
+    async function stationaryFailed(alert) {
+      const fails = alert?.fails || 0;
+      if (fails > failsSeen) toast(`Stationary test failed (${Math.min(fails, maxTries)}/${maxTries})`, "bad", 6000);
+      failsSeen = fails;
+      if (!alert || failAsking || !alert.waiting) return;
+      failAsking = true;
+      const forWo = wo || status.temsWo || status.wo || "";
+      const used = fails >= maxTries;  // 3 tries done: test again, or skip it and move on
+      beep(used ? 2 : 1);  // the same beep as stationary done / test complete
+      const choice = await modal(used ? {
+        title: `Stationary failed ${fails} times`,
+        body: `The stationary test on <b>${esc(forWo)}</b> failed <b>${fails} times</b>.
+
+Skip it (saved on the ticket as failed ${fails}x - nothing pressed in TEMS), or test it again?`,
+        buttons: [{ label: "Skip it", value: "skip", cls: "btnDanger" }, { label: "Test again", value: "redo", cls: "btnPrimary" }],
+      } : {
+        title: `Stationary test failed - ${fails}/${maxTries}`,
+        body: `TEMS says the stationary test on <b>${esc(forWo)}</b> failed (try ${fails} of ${maxTries}) and asks to start it again.
+
+Retry presses its OK. Cancel leaves it - nothing is pressed.`,
+        buttons: [{ label: "Cancel", value: "cancel" }, { label: `Retry (${fails + 1}/${maxTries})`, value: "redo", cls: "btnPrimary" }],
+      });
+      try {
+        if (choice === "redo") {
+          const { job: started } = await api("/api/tems/stationaryRedo", { body: { wo: forWo } });
+          job.run(started, () => {}).then((done) => toast(done.result?.summary || done.result?.error || done.error || "Done.",
+            done.state === "done" && done.result?.ok !== false ? "ok" : "bad"));
+        } else await api("/api/tems/stationaryCancel", { body: { wo: forWo, skip: choice === "skip" } });
+      } catch (error) { toast(error.message, "bad"); }
+      failAsking = false;
+      pollStage(true);
+    }
     function showStage(next, fresh) {
       const before = stage;
       stage = next;
@@ -422,8 +578,18 @@ export default {
       // until Start Stationary begins a new run.
       const ended = stage === "ended" ? status.ended || {} : null;
       const note = q(".runNote");
-      note.hidden = !ended;
-      if (ended) {
+      note.hidden = !ended && stage !== "otherWo" && stage !== "stale";
+      paintFlow(status.flow || []);
+      checkInBeep(status.checkIn);
+      stationaryFailed(status.stationaryFail);
+      if (stage === "otherWo") {
+        note.dataset.as = "other";
+        note.innerHTML = `${icon("info", "sm")}<span>TEMS has <b>${esc(status.otherWo)}</b> open, not <b>${esc(wo)}</b> - its test isn't shown here.</span>`;
+      } else if (stage === "stale") {
+        note.dataset.as = "stale";
+        note.innerHTML = `${icon("alert", "sm")}<span>TEMS still shows an <b>earlier run</b> of ${esc(wo)} (not this ticket's) - press Start Stationary to test this ticket.</span>
+          <button class="btn btnGhost sm" data-adopt title="You tested it by hand in TEMS: count what TEMS shows for this ticket">It's this ticket's run</button>`;
+      } else if (ended) {
         const word = { submit: "submitted", discard: "discarded", suspend: "suspended" }[ended.as] || "ended";
         const at = ended.at ? new Date(ended.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "";
         // Submit is final; Discard / Suspend mean the WO gets tested again
@@ -433,14 +599,15 @@ export default {
       }
       paintPop();
       if (next === before || !before) return;  // first read on opening the page: no sound
-      if (stage === "mobility") { beep(1); toast("TEMS: stationary test done - start moving for mobility.", "ok", 8000); }
-      if (stage === "complete") { beep(2); toast("TEMS: stationary and mobility done - Submit, Discard or Suspend.", "ok", 10000); }
+      if (stage === "mobility") { beep(1); toast("Stationary done - start moving.", "ok", 8000); }
+      if (stage === "complete") { beep(2); toast("Test complete.", "ok", 10000); }
     }
     async function pollStage(once = false) {
       if (!document.hidden) {
         try {
-          const now = await api("/api/tems/status");
-          showStage(now.stage || "", now);
+          const asked = wo;
+          const now = await api(`/api/tems/status?wo=${enc(asked)}`);
+          if (asked === wo) showStage(now.stage || "", now);  // the WO changed meanwhile: not this answer
         } catch { /* server busy: keep what we show */ }
       }
       if (!once) { clearTimeout(stageTimer); stageTimer = setTimeout(pollStage, 3000); }
@@ -455,15 +622,17 @@ export default {
       paintPhones();
     }
 
-    // Each step of a test as a short pop-up (airplane on / off, Service Mode opening / opened,
-    // split set, speed test started / result...). Only the newest few stay on screen.
+    // Steps as pop-ups: only results and problems, kept short (the rest is debug - not shown).
     function stepToast(text) {
-      const clean = String(text).replace(/^\[([^\]]+)\]\s*/, "$1: ");
-      const kind = /warning|failed|no speed|no internet|didn't|not found/i.test(clean) ? "warn"
-        : /ready|done:|back online|split set|opened|reusing/i.test(clean) ? "ok" : "info";
-      toast(clean.replace(/^WARNING:\s*/i, ""), kind, 4500);
-      const steps = [...document.querySelectorAll("#toasts .toast")];
-      steps.slice(0, Math.max(0, steps.length - 3)).forEach((node) => node.remove());
+      const clean = String(text).replace(/^\[([^\]]+)\]\s*/, "$1: ").replace(/WARNING:\s*/i, "");
+      const done = clean.match(/^(.+?): speed test done: ([\d.?]+) Mbps down, ping ([\d.?]+) ms/);
+      if (done) return toast(`${done[1]}: ${done[2]} Mbps · ping ${done[3]} ms`, "ok", 5000);
+      const noSpeed = clean.match(/^(.+?): no speed: ([^(]+)/);
+      if (noSpeed) return toast(`${noSpeed[1]}: no speed - ${noSpeed[2].trim()}`, "warn", 6000);
+      if (/^(.+?): hotspot (on|off)$/i.test(clean)) return toast(clean, "ok", 4000);
+      if (/play pressed|already running/i.test(clean)) return toast("TEMS: playing", "ok", 4000);
+      if (/warning|failed|no internet|didn't|not found|couldn't|could not|stuck|may still|isn't/i.test(String(text)))
+        toast(clean.replace(/\s*\([^)]*\)/g, ""), "warn", 6000);
     }
 
     async function run(action, phone) {
@@ -512,7 +681,22 @@ export default {
       }
     }
 
-    root.addEventListener("click", (e) => {
+    root.addEventListener("click", async (e) => {
+      if (e.target.closest("[data-reboot]")) {
+        const sure = await modal({
+          title: "Restart both phones?",
+          body: "TMO 1 and TMO 2 restart at the same time - about a minute. Anything running on them stops.",
+          buttons: [{ label: "Cancel", value: false }, { label: "Restart", value: true, cls: "btnDanger" }],
+        });
+        if (sure) api("/api/live/reboot", { body: { wo } }).then((r) => toast(r.summary, "ok")).catch((err) => toast(err.message, "bad"));
+        return;
+      }
+      if (e.target.closest("[data-adopt]")) {
+        try { await api("/api/tems/adoptRun", { body: { wo } }); toast(`${wo}: TEMS's run counts for this ticket.`, "ok"); }
+        catch (err) { toast(err.message, "bad"); }
+        pollStage(true);
+        return;
+      }
       const button = e.target.closest("button[data-action]");
       if (button && !button.disabled && button.dataset.action === "temsPlay") startTems(button);
       else if (button && !button.disabled) run(button.dataset.action, button.dataset.phone || "");
@@ -547,7 +731,7 @@ const popScreens = {
   submitByHand: { title: "Marked as submitted", text: "You finished it in TEMS - marked done. Check the result below, then Close.", step: 2, done: true },
   submitFailed: { title: "Submit got stuck", text: "The steps below show how far it got.", step: 2, bad: true },
   "ending-suspend": { title: "Suspending the test", text: "Suspending in TEMS. You'll test this WO again with Start Stationary.", step: 2, busy: true },
-  "ending-discard": { title: "Discarding the test", text: "Discarding the run in TEMS. You'll test this WO again with Start Stationary.", step: 2, busy: true },
+  "ending-discard": { title: "Discarding the test", text: "Discarding the run in TEMS, then opening the WO again (Assign, Open, wait for play, Map) - nothing else is pressed.", step: 2, busy: true },
   paused: { title: "Test paused in TEMS", text: "The run is paused. Resume it in TEMS (Control, then play) - this updates by itself.", step: -1 },
   failed: { title: "TEMS stopped the run", text: "TEMS reports the run failed. Check the TEMS tab.", step: -1, bad: true },
 };

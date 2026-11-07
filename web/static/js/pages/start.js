@@ -190,7 +190,7 @@ export default {
       paintWaiting();
       try {
         await api("/api/start/order", { body: { keys } });
-        toast("Order saved - Maps follows it too.", "ok", 2200);
+        toast("Order saved.", "ok", 2200);
       } catch (error) {
         waiting = before; paintWaiting();
         toast(error.message, "bad");
@@ -372,7 +372,7 @@ export default {
           await start();
           return;
         }
-        if (tems?.closed) toast(`${wo} shows Closed in TEMS - it'll be reserved and opened again.`, "info", 6000);
+        if (tems?.closed) toast(`${wo} is Closed in TEMS - reopening.`, "info", 6000);
       }
       // Always first: find the WO in TEMS and take TEMS's spelling (d / e) before anything is made.
       // Cloud: check only, then the ticket, then Reserve + Open. Local (prod): one TEMS visit does the

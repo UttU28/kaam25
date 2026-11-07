@@ -1,5 +1,6 @@
 """Send a WO's location to Apeksha (your codeShare site), to open on your phone: just its Google
-Maps link (https://www.google.com/maps?q=<lat>,<lon>), which Apeksha shows as a clickable link.
+Maps directions link (https://www.google.com/maps/dir/?api=1&destination=<lat>,<lon>&travelmode=driving):
+opened on the phone, Maps starts the driving route from where you are.
 
     POST <APEKSHA_URL>/codeShare   {"content": "<Google Maps link>"}
 """
@@ -16,8 +17,9 @@ class ApekshaError(Exception):
 
 
 def mapsLink(lat, lon):
-    """A Google Maps link that opens the pin at these coordinates."""
-    return f"https://www.google.com/maps?q={str(lat).strip()},{str(lon).strip()}"
+    """A Google Maps link that opens the driving route from where you are to these coordinates."""
+    return (f"https://www.google.com/maps/dir/?api=1&destination={str(lat).strip()},{str(lon).strip()}"
+            "&travelmode=driving")
 
 
 def shareLocation(lat, lon, name=None, timeout=10):

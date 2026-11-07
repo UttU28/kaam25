@@ -90,6 +90,10 @@ ticketFields = (
     "startType", "localGridNumber",
     "folderName", "endedAt", "eq3", "eq6", "status", "totalGrids", "attempted", "skipped", "remarks",
     "gridSummaryPath", "picturePath", "pictureAt", "pictureSource", "whatsappSentAt", "woDoneSentAt", "closeStep1At", "closeStep2At", "closeStep3At", "closedAt", "speedTests",
+    # the drive itself (ticketFlow): created, in the grid, the TEMS run, submitted, every button pressed
+    "ticketCreationTime", "checkInTime", "checkInSource", "checkOutTime", "clicks",
+    "temsRunStartedAt", "temsRunStartHow", "temsRunEnd", "temsRunEndedAt", "temsSubmit", "submittedAt",
+    "stationaryDoneAt", "testCompleteAt", "stationarySkippedAt", "stationaryFails",
 )
 
 
@@ -109,6 +113,7 @@ def startNewTicket(wo, event=None, **fields):
             old["replacedAt"] = now()
             record.setdefault("previousTickets", []).append(old)
         record.update({name: value for name, value in fields.items() if value is not None})
+        record.setdefault("ticketCreationTime", now())
         record["updatedAt"] = now()
         if event:
             record.setdefault("history", []).append({"at": now(), "event": event})
@@ -116,6 +121,23 @@ def startNewTicket(wo, event=None, **fields):
         tickets[key] = record
         writeFile(tickets)
         return dict(record)
+
+
+def beginTicket(wo, ticketId, event=None, **fields):
+    """A cloud ticket for the WO: a different ticket than the one on the record (or the record still
+    holds an older ticket's progress) starts fresh like startNewTicket - nothing of the old ticket's
+    run, submit or end shows on the new one. The same ticket again: just saved."""
+    record = getRecord(wo) or {}
+    same = ticketId and record.get("startTicketId") == ticketId
+    older = bool(record.get("startedAt") or record.get("ticketId"))  # started before (not just imported)
+    # Today's drive still going (not ended / closed): the new ID carries on the same drive - its
+    # check-in, run and speed tests stay. Another day, or the drive was ended: a fresh ticket.
+    goingToday = startedToday(record) and not record.get("endedAt") and not record.get("closedAt")
+    if older and not same and not goingToday:
+        return startNewTicket(wo, event=event, ticketId=ticketId, startTicketId=ticketId, **fields)
+    if not record.get("ticketCreationTime"):  # older records: the ticket began when it was first started
+        fields["ticketCreationTime"] = record.get("startedAt") or now()
+    return saveRecord(wo, event=event, ticketId=ticketId, startTicketId=ticketId, **fields)
 
 
 # ---------- cloud / local start ----------
@@ -179,7 +201,7 @@ def startLocal(wo, event=None, **fields):
         ticketId = localTicketId(number)
         record.update({name: value for name, value in fields.items() if value is not None})
         record.update(startType="local", localGridNumber=number, ticketId=ticketId, startTicketId=ticketId,
-                      startedAt=now(), submitted=False, updatedAt=now())
+                      startedAt=now(), ticketCreationTime=now(), submitted=False, updatedAt=now())
         record.setdefault("history", []).append({"at": now(), "event": event or f"Start: local start as {ticketId}"})
         record["history"] = record["history"][-maxHistory:]
         tickets[key] = record

@@ -129,6 +129,27 @@ def writeDebugLog(message):
 temsStage = {"stage": "", "wo": "", "at": 0.0}
 
 
+# Stationary test failures in this run, from the TEMS tab: fails = "Stationary test failed" seen,
+# waiting = TEMS asks to start the stationary test again (not pressed - Live Testing asks you),
+# ack = the fails count you already answered (Cancel / Redo).
+stationaryAlert = {"wo": "", "fails": 0, "waiting": False, "ack": 0, "at": 0.0}
+
+
+def resetStationaryAlert(wo=""):
+    stationaryAlert.update(wo=wo, fails=0, waiting=False, ack=0, at=0.0)
+
+
+def noteStationary(event, wo=""):
+    if wo and stationaryAlert["wo"] and wo.lower() != stationaryAlert["wo"].lower():
+        resetStationaryAlert(wo)  # another WO's run: count from 0
+    stationaryAlert["wo"] = wo or stationaryAlert["wo"]
+    if event == "stationaryFailed":
+        stationaryAlert["fails"] += 1
+    else:
+        stationaryAlert["waiting"] = True
+    stationaryAlert["at"] = time.time()
+
+
 def setTemsStage(stage, wo=""):
     temsStage.update(stage=stage, wo=wo or temsStage.get("wo", ""), at=time.time())
 
@@ -221,6 +242,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
             pass  # the extension checking in; the reply below tells it to reload if it's out of date
         elif message.get("stage") == "temsStage":
             setTemsStage(message.get("temsStage") or "", message.get("wo") or "")
+            if message.get("event") in ("stationaryFailed", "stationaryAsk"):
+                noteStationary(message["event"], message.get("wo") or "")
+            if message.get("event") == "gridEntered":  # TEMS: "Entered target grid cell ..." -> check-in
+                from .gridWatch import fromTemsPopup
+                threading.Thread(target=fromTemsPopup, args=(message.get("eventText") or "", message.get("wo") or ""),
+                                 daemon=True).start()
         else:
             with messagesCondition:
                 if requestId in pendingMessages:  # ignore anything we didn't ask for

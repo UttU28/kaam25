@@ -334,6 +334,7 @@
     const confirm = await waitFor(() => notificationButton(/do not attempt to adjust this device/i, /^i understand$/i), 8000, 250);
     if (confirm) {
       debugLog("confirming the driving warning: I understand");
+      await ignoreForSession(confirm);
       await realClick(confirm);
       await waitFor(() => !notificationButton(/do not attempt to adjust this device/i, /^i understand$/i), 4000);
     }
@@ -351,6 +352,51 @@
       const hit = [...box.querySelectorAll('[class*="Button_button"], a, button')]
         .find((el) => isVisible(el) && label.test(textOf(el)));
       if (hit) return hit;
+    }
+    return null;
+  }
+
+  // A TEMS pop-up's "Ignore for this session" box (Checkbox_container: an empty Checkbox_checkbox
+  // div + the label): ticked before its OK, so the same warning doesn't come back all session.
+  const ignoreTicked = new WeakSet();
+  function ignoreBoxOf(button) {
+    const box = button?.closest('[class*="UserNotification_notification-body"]');
+    return box ? [...box.querySelectorAll('[class*="Checkbox_container"]')]
+      .find((el) => isVisible(el) && /ignore for this session/i.test(textOf(el))) || null : null;
+  }
+  const isTicked = (container) => {
+    const tick = container.querySelector('[class*="Checkbox_checkbox"]');
+    return /checked|selected|active/i.test(`${tick?.className || ""} ${container.className}`) ||
+      tick?.getAttribute("aria-checked") === "true" || container.getAttribute("aria-checked") === "true" ||
+      !!tick?.querySelector("svg, img, path, i, span");
+  };
+  async function ignoreForSession(button) {
+    const container = ignoreBoxOf(button);
+    if (!container || ignoreTicked.has(container)) return false;
+    ignoreTicked.add(container);  // once per pop-up: a second click would untick it
+    if (isTicked(container)) return true;
+    const target = container.querySelector('[class*="Checkbox_checkbox"]') || container;
+    const rect = target.getBoundingClientRect();
+    const at = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2, button: 0 };
+    for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup"]) {
+      target.dispatchEvent(new (type.startsWith("pointer") ? PointerEvent : MouseEvent)(type, at));
+    }
+    target.click();
+    await sleep(250);
+    debugLog(`ticked "Ignore for this session"${isTicked(container) ? "" : " (couldn't see it ticked)"}`);
+    return true;
+  }
+  // Any warning pop-up with "Ignore for this session" and an OK (e.g. "Low Scanner NR RSRP"):
+  // the OK button, for the watcher.
+  function ignorableWarningOk() {
+    for (const box of document.querySelectorAll('[class*="UserNotification_notification-body"]')) {
+      if (!isVisible(box)) continue;
+      const card = box.closest('[data-severity]');
+      if (card && !/warning/i.test(card.getAttribute("data-severity") || "")) continue;
+      if (/start the stationary test/i.test(textOf(box))) continue;  // only its own rule (OK once per run) answers it
+      if (![...box.querySelectorAll('[class*="Checkbox_container"]')].some((el) => /ignore for this session/i.test(textOf(el)))) continue;
+      const ok = [...box.querySelectorAll('[class*="Button_button"], a, button')].find((el) => isVisible(el) && /^ok$/i.test(textOf(el)));
+      if (ok) return ok;
     }
     return null;
   }
@@ -379,6 +425,7 @@
   }
   // Tells the app (Live Testing) the stage; sent on every change and every 20 s while watching.
   function reportStage(stage) {
+    if (["started", "closed", "mobility", "complete"].includes(stage)) window.kaamStationaryOks = 0;  // a new run / stationary over
     if (stage) window.kaamStage = stage;
     chrome.runtime.sendMessage({ type: "temsStage", stage: window.kaamStage || "", wo }).catch(() => {});
   }
@@ -395,9 +442,13 @@
     const answers = [
       { text: /do not attempt to adjust this device/i, label: () => /^i understand$/i, what: () => "driving warning: I understand",
         skip: () => window.kaamPlaying },  // the play step clicks this one itself
-      { text: /start the stationary test/i, label: () => /^ok$/i, what: () => "stationary test: OK" },
+      // OK only the first time in a run: shown again = the stationary test failed - the app asks you
+      // (Redo presses OK through the "stationaryOk" action, Cancel leaves it)
+      { text: /start the stationary test/i, label: () => /^ok$/i, what: () => "stationary test: OK",
+        skip: () => (window.kaamStationaryOks || 0) >= 1, after: () => { window.kaamStationaryOks = (window.kaamStationaryOks || 0) + 1; } },
       { text: /low ue nr rsrp|change the stationary location/i, label: () => /^ok$/i, what: () => "Low UE NR RSRP: OK" },
       { text: /good rsrp|this location is good/i, label: () => /^ok$/i, what: () => "Good RSRP: OK" },
+      { text: /low scanner nr rsrp|scanner antenna/i, label: () => /^ok$/i, what: () => "Low Scanner NR RSRP: OK" },
     ];
     const press = (el) => {
       const rect = el.getBoundingClientRect();
@@ -421,8 +472,36 @@
         if (!el || lastPressed.has(el)) continue;
         lastPressed.add(el);  // once per pop-up
         debugLog(answer.what());
-        press(el);
+        ignoreForSession(el).finally(() => press(el));  // "Ignore for this session" ticked first, if it has one
         answer.after?.();
+      }
+      // Any other warning with "Ignore for this session": tick it, then OK.
+      const warningOk = ignorableWarningOk();
+      if (warningOk && !lastPressed.has(warningOk)) {
+        lastPressed.add(warningOk);
+        debugLog(`warning: ${textOf(warningOk.closest('[class*="UserNotification_notification-body"]')).split(/\n/)[0]} - Ignore for this session + OK`);
+        ignoreForSession(warningOk).finally(() => press(warningOk));
+      }
+      // "Stationary test failed": counted by the app. The start-the-test pop-up shown again after the
+      // first OK: not pressed - the app asks you (Redo / Cancel).
+      for (const body of document.querySelectorAll('[class*="UserNotification_notification-body"]')) {
+        const said = textOf(body);
+        const failed = /stationary test failed/i.test(said);
+        const askedAgain = /start the stationary test/i.test(said) && (window.kaamStationaryOks || 0) >= 1;
+        const pressedHere = [...body.querySelectorAll("a, button")].some((b) => lastPressed.has(b) || lastPressed.has(b.closest("a, button")));
+        if (!(failed || askedAgain) || lastPressed.has(body) || pressedHere) continue;  // pressedHere: the first OK, just pressed
+        lastPressed.add(body);
+        debugLog(failed ? "stationary test failed" : "start-stationary pop-up again - waiting for the app (Redo / Cancel)");
+        chrome.runtime.sendMessage({ type: "temsStage", stage: window.kaamStage || "", wo,
+          event: failed ? "stationaryFailed" : "stationaryAsk", eventText: said.slice(0, 200) }).catch(() => {});
+      }
+      // "Entered target grid cell <WO>" (TEMS also says it out loud): the app checks the WO in (first time only).
+      for (const body of document.querySelectorAll('[class*="UserNotification_notification-body"]')) {
+        const said = textOf(body);
+        if (!/entered target grid cell/i.test(said) || lastPressed.has(body)) continue;
+        lastPressed.add(body);
+        debugLog(`grid entered: ${said.split(/\n/)[0]}`);
+        chrome.runtime.sendMessage({ type: "temsStage", stage: window.kaamStage || "", wo, event: "gridEntered", eventText: said.slice(0, 200) }).catch(() => {});
       }
       // A stage only moves forward on screen; other TEMS pages (Assign...) show none, so keep the last.
       const seen = stageOnScreen();
@@ -623,6 +702,7 @@
     const button = await waitFor(() => notificationButton(text, label), waitMs, 300);
     if (!button) return false;
     debugLog(`${what}: ${textOf(button)}`);
+    await ignoreForSession(button);
     await realClick(button);
     await waitFor(() => !notificationButton(text, label), 5000);
     return true;
@@ -649,6 +729,33 @@
     debugLog(`details panel scrolled to ${Math.round(box.scrollTop)} of ${box.scrollHeight - box.clientHeight}`);
     await sleep(800);  // let the map and the panel settle before the picture
   };
+  // After Discard: the WO opened again from Assign, wait for Control's play button to be ready
+  // (not pressed), then the Map page. Returns what it did.
+  const controlPlayButton = () => {
+    const box = [...document.querySelectorAll('[class*="WorkOrderControl_container"]')].find(isVisible);
+    const buttons = box ? [...box.querySelectorAll('[class*="WorkOrderControl_button"]')].filter(isVisible) : [];
+    const main = buttons[buttons.length - 1];  // an error button, if any, comes first
+    return main ? main.closest('button, [role="button"]') || main : null;
+  };
+  const reopenAfterDiscard = async () => {
+    if (!wo) return "not opened again (no WO picked in Live Testing)";
+    const row = await assignRowFor(wo, 20000);
+    if (!row) throw new Problem(`${wo} isn't on Assign`);
+    await openAssignDetails(wo, row);
+    const openButton = await openButtonWithLogin(wo, 8000);
+    if (!openButton) throw new Problem("no Open button on Assign");
+    if (!isEnabled(openButton)) throw new Problem(`its ${textOf(openButton)} button is greyed out`);
+    await press(openButton, () => !openButton.isConnected || !isVisible(openButton) ||
+      !assignDetailsShowWo(wo) || isSelected(menuButton("Control")), textOf(openButton));
+    debugLog("discard: opened again, waiting for play to be ready");
+    const control = await waitFor(() => menuButton("Control"), 15000);
+    if (control && !isSelected(control)) await clickAndWait(control, () => isSelected(menuButton("Control")));
+    const ready = await waitFor(() => { const b = controlPlayButton(); return b && isEnabled(b) ? b : null; }, 120000, 1000);
+    const map = await waitFor(() => menuButton("Map"), 8000);
+    if (map && !isSelected(map)) await clickAndWait(map, () => isSelected(menuButton("Map")));
+    const onMap = isSelected(menuButton("Map"));
+    return `opened again${ready ? ", play ready (not pressed)" : ", play not ready after 2 min"}${onMap ? ", Map page open" : ""}`;
+  };
   const endRun = async (kind) => {
     watchNotifications();
     if (kind === "suspend") {
@@ -664,7 +771,11 @@
       const yes = await clickNotification(/discard this work order/i, /^yes$/i, 15000, "discard confirm");
       if (!yes) throw new Problem("Pressed Discard, but TEMS didn't ask to confirm - check the TEMS tab.");
       reportStage("closed");
-      finish({ ok: true, summary: "TEMS: discarded (confirmed Yes)." });
+      // Open the WO again so it's ready for the next command: Assign -> the WO -> Open, wait until
+      // the play button is ready, then the Map page. Nothing else is pressed (no play).
+      let again;
+      try { again = await reopenAfterDiscard(); } catch (error) { again = `not opened again: ${error.message}`; }
+      finish({ ok: true, summary: `TEMS: discarded (confirmed Yes), ${again}.` });
       return;
     }
     // Submit: Chrome full window, Suspend, then on Assign: the WO's details scrolled to the bottom,
@@ -775,6 +886,14 @@
     if (action === "results") { await resultsCheck(); return; }
     if (action === "play") { watchNotifications(); reportStage("started"); await playOnControl(); return; }
     if (action === "openWo") { await openWoForTest(); return; }
+    if (action === "stationaryOk") {  // Redo after a failed stationary test: OK on "start the stationary test"
+      watchNotifications();
+      const pressed = await clickNotification(/start the stationary test/i, /^ok$/i, 20000, "stationary test: OK (redo)");
+      if (pressed) window.kaamStationaryOks = (window.kaamStationaryOks || 0) + 1;
+      finish(pressed ? { ok: true, summary: "TEMS: stationary test started again (OK)." }
+        : { ok: false, error: "TEMS isn't asking to start the stationary test any more - nothing pressed." });
+      return;
+    }
     if (action === "cloudLogin") {  // TEMS not connected to TEMS Cloud: log in, then back to Control
       watchNotifications();
       const state = await cloudLogin();

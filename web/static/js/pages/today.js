@@ -271,7 +271,7 @@ function waitingCard() {
       const done = await job.run(started);
       if (done.state === "done") {
         const found = done.result?.found?.length || 0;
-        toast(found ? `${found} of ${wos.length} now in TEMS - added to Start's To start list.`
+        toast(found ? `${found} of ${wos.length} now in TEMS.`
           : `Still not in TEMS: all ${wos.length}.`, found ? "ok" : "warn", 7000);
       } else toast(done.error || "TEMS check stopped.", "bad");
     } catch (error) {

@@ -64,6 +64,7 @@ const paths = {
   arrow: '<path d="M5 12h14M13 6l6 6-6 6"/>',
   stop: '<rect x="6" y="6" width="12" height="12" rx="2"/>',
   refresh: '<path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/>',
+  power: '<path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.8 0"/>',
   list: '<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>',
   sheet: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M8 13h8M8 17h8"/>',
   pin: '<path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0z"/><circle cx="12" cy="10" r="3"/>',
@@ -93,10 +94,23 @@ export function hydrateIcons(root = document) {
 
 // ---------- toasts ----------
 const toastIcons = { ok: "check", bad: "alert", warn: "alert", info: "info" };
+// Short: the first line only, cut at ~90 characters (the full text shows on hover). Top right,
+// click to close, only the newest few on screen.
+const toastMax = 3;
+export function shortText(text, size = 90) {
+  const line = String(text ?? "").split(/\n/).map((x) => x.trim()).find(Boolean) || "";
+  return line.length > size ? `${line.slice(0, size - 1).replace(/[\s,;:.-]+\S*$/, "")}…` : line;
+}
 export function toast(text, kind = "info", ms = 4200) {
-  const node = h(`<div class="toast ${kind}">${icon(toastIcons[kind] || "info")}<div>${esc(text)}</div></div>`);
-  $("#toasts").append(node);
-  setTimeout(() => { node.style.transition = "opacity .25s"; node.style.opacity = "0"; setTimeout(() => node.remove(), 260); }, ms);
+  const short = shortText(text);
+  if (!short) return;
+  const node = h(`<div class="toast ${kind}" title="${esc(String(text))} (click to close)">${icon(toastIcons[kind] || "info")}<div>${esc(short)}</div></div>`);
+  const close = () => { node.style.transition = "opacity .2s"; node.style.opacity = "0"; setTimeout(() => node.remove(), 210); };
+  node.addEventListener("click", close);
+  const box = $("#toasts");
+  box.prepend(node);  // newest on top
+  [...box.children].slice(toastMax).forEach((old) => old.remove());
+  setTimeout(close, Math.min(ms, 6000));
 }
 
 // ---------- modal ----------
@@ -353,5 +367,5 @@ export function watchJob(job, onUpdate) {
 }
 export async function stopAll() {
   await api("/api/stop", { method: "POST" });
-  toast("Stop sent. Anything waiting on Chrome ends now.", "warn");
+  toast("Stopped.", "warn");
 }

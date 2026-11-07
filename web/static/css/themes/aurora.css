@@ -39,17 +39,14 @@
 [data-theme="aurora"] ::selection { background: rgba(139, 123, 255, .45); }
 [data-theme="aurora"] ::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, .12); border-color: transparent; background-clip: padding-box; }
 
-/* the northern lights: three slow blurred glows behind everything */
+/* the northern lights: three blurred glows behind everything. Kept still - drifting made Chrome
+   re-blur every glass card each frame, which flickered (most over the map). */
 [data-theme="aurora"] body::before, [data-theme="aurora"] body::after, [data-theme="aurora"] .shell::before {
   content: ""; position: fixed; z-index: -1; border-radius: 50%; filter: blur(100px); pointer-events: none;
 }
-[data-theme="aurora"] body::before { width: 640px; height: 640px; left: -140px; top: -200px; background: #3b2cff; opacity: .5; animation: auroraDrift 24s ease-in-out infinite alternate; }
-[data-theme="aurora"] body::after { width: 560px; height: 560px; right: -160px; top: 25%; background: #b23cff; opacity: .32; animation: auroraDrift 30s ease-in-out infinite alternate-reverse; }
-[data-theme="aurora"] .shell::before { width: 560px; height: 560px; left: 38%; bottom: -280px; background: #00c2a8; opacity: .24; animation: auroraDrift 27s ease-in-out infinite alternate; }
-@keyframes auroraDrift { to { transform: translate(90px, 70px) scale(1.15); } }
-@media (prefers-reduced-motion: reduce) {
-  [data-theme="aurora"] body::before, [data-theme="aurora"] body::after, [data-theme="aurora"] .shell::before { animation: none; }
-}
+[data-theme="aurora"] body::before { width: 640px; height: 640px; left: -140px; top: -200px; background: #3b2cff; opacity: .5; }
+[data-theme="aurora"] body::after { width: 560px; height: 560px; right: -160px; top: 25%; background: #b23cff; opacity: .32; }
+[data-theme="aurora"] .shell::before { width: 560px; height: 560px; left: 38%; bottom: -280px; background: #00c2a8; opacity: .24; }
 
 /* type */
 [data-theme="aurora"] .pageHeading h1, [data-theme="aurora"] .cardHead h2, [data-theme="aurora"] .heroCard h2,

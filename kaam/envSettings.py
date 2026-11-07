@@ -60,6 +60,9 @@ fields = [
     ("WHATSAPP_AUTO_SHARE", "WhatsApp", "Share by itself after End", "bool",
      "On: once End Ticket / Upload has the Ticket ID, both EQ Job IDs and the renamed GridSummary, End shares on WhatsApp by itself. Off: you press WhatsApp.",
      {"optional": True, "default": "true"}),
+    ("WHATSAPP_NO_PICTURE", "WhatsApp", "Share without the TEMS picture", "bool",
+     "On: the summary can be shared even when the WO has no TEMS picture (CSV + report only). Off: the picture is required.",
+     {"optional": True, "default": "false"}),
     ("WHATSAPP_RETRIES", "WhatsApp", "Retries", "int", "Extra tries when a share fails (5 s apart).", {"min": 0, "max": 10}),
     # ---------- Web pages ----------
     ("TICKETS_URL", "Web pages", "TechInsights tickets page", "url", "", {}),

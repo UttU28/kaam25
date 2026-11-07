@@ -59,6 +59,16 @@ export function temsMapCard({ compact = false, fitTo = "all", pan = null } = {})
   const dot = q(".liveDot"), woLabel = q(".tmWo"), msg = q(".tmMsg"), panBtn = q(".tmPan");
 
   let map = null, L = null, overlay = null, timer = null, dead = false, fitted = false;
+  // Speed test pins (Live Testing): [{lat, lon, html, popup, best}] - drawn over TEMS's layers.
+  let pins = [], pinLayer = null;
+  function drawPins() {
+    if (!map || !L) return;
+    pinLayer?.remove();
+    pinLayer = L.layerGroup(pins.map((p) => L.marker([p.lat, p.lon], {
+      icon: L.divIcon({ className: "spIcon", html: p.html, iconSize: [0, 0], iconAnchor: [0, 0], popupAnchor: [0, -38] }),
+      zIndexOffset: p.best ? 900 : 800, riseOnHover: true,
+    }).bindPopup(p.popup, { maxWidth: 320 }))).addTo(map);
+  }
   let data = null, track = [], previousTrack = [], roadRoute = null, routeKey = "";
   let car = null, carPrev = null, heading = 0;
   const savedPan = lsGet(panKey);
@@ -333,6 +343,7 @@ export function temsMapCard({ compact = false, fitTo = "all", pan = null } = {})
       },
     });
     overlay = new Overlay().addTo(map);
+    drawPins();
     // Dragging the map pauses auto pan until you press it again (TEMS does the same).
     map.on("dragstart", () => { if (autoPan) { autoPan = false; lsSet(panKey, "0"); paintPan(); } });
     // A new size (shown after being hidden, window turned...): zoomed to fit again - unless you've
@@ -350,6 +361,7 @@ export function temsMapCard({ compact = false, fitTo = "all", pan = null } = {})
 
   return {
     el,
+    setSpeedPins(list) { pins = list || []; drawPins(); },
     destroy() { dead = true; clearTimeout(timer); map?.remove(); map = null; },
   };
 }

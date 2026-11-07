@@ -11,8 +11,9 @@ import maps from "./pages/maps.js";
 import sheets from "./pages/sheets.js";
 import live from "./pages/live.js";
 import connection from "./pages/connection.js";
+import remarks from "./pages/remarks.js";
 
-const pages = { today, maps, sheets, live, start, end, close, records, connection, settings };
+const pages = { today, maps, sheets, remarks, live, start, end, close, records, connection, settings };
 const navItems = [
   ["Work", null],
   ["today", "Today", "today", "var(--accent)"],
@@ -22,6 +23,7 @@ const navItems = [
   ["close", "Close Ticket", "lock", "var(--amber)", "readyToClose"],
   ["maps", "Maps", "map", "var(--green)"],
   ["sheets", "Sheets", "sheet", "var(--accent)"],
+  ["remarks", "Remarks", "list", "var(--amber)"],
   ["Library", null],
   ["records", "Records", "records", "var(--purple)"],
   ["connection", "Connection", "wifi", "var(--accent)"],
